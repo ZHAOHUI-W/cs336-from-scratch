@@ -34,6 +34,8 @@ mkdir -p "$(dirname "tests/_snapshots/test_transformer_lm.npz")"
 if [[ -f "tests/_snapshots/test_transformer_lm.npz" ]]; then echo "  skip tests/_snapshots/test_transformer_lm.npz"; else curl -fsSL -o "tests/_snapshots/test_transformer_lm.npz" "https://raw.githubusercontent.com/stanford-cs336/assignment1-basics/a158843b20107949f1a8d7df1b05cd33b9166712/tests/_snapshots/test_transformer_lm.npz"; echo "  ok tests/_snapshots/test_transformer_lm.npz (1920264 bytes)"; fi
 mkdir -p "$(dirname "tests/_snapshots/test_transformer_lm_truncated_input.npz")"
 if [[ -f "tests/_snapshots/test_transformer_lm_truncated_input.npz" ]]; then echo "  skip tests/_snapshots/test_transformer_lm_truncated_input.npz"; else curl -fsSL -o "tests/_snapshots/test_transformer_lm_truncated_input.npz" "https://raw.githubusercontent.com/stanford-cs336/assignment1-basics/a158843b20107949f1a8d7df1b05cd33b9166712/tests/_snapshots/test_transformer_lm_truncated_input.npz"; echo "  ok tests/_snapshots/test_transformer_lm_truncated_input.npz (960264 bytes)"; fi
+mkdir -p "$(dirname "tests/fixtures/corpus.en")"
+if [[ -f "tests/fixtures/corpus.en" ]]; then echo "  skip tests/fixtures/corpus.en"; else curl -fsSL -o "tests/fixtures/corpus.en" "https://raw.githubusercontent.com/stanford-cs336/assignment1-basics/a158843b20107949f1a8d7df1b05cd33b9166712/tests/fixtures/corpus.en"; echo "  ok tests/fixtures/corpus.en (133027 bytes)"; fi
 mkdir -p "$(dirname "tests/fixtures/gpt2_merges.txt")"
 if [[ -f "tests/fixtures/gpt2_merges.txt" ]]; then echo "  skip tests/fixtures/gpt2_merges.txt"; else curl -fsSL -o "tests/fixtures/gpt2_merges.txt" "https://raw.githubusercontent.com/stanford-cs336/assignment1-basics/a158843b20107949f1a8d7df1b05cd33b9166712/tests/fixtures/gpt2_merges.txt"; echo "  ok tests/fixtures/gpt2_merges.txt (456304 bytes)"; fi
 mkdir -p "$(dirname "tests/fixtures/gpt2_vocab.json")"
@@ -42,4 +44,6 @@ mkdir -p "$(dirname "tests/fixtures/tinystories_sample_5M.txt")"
 if [[ -f "tests/fixtures/tinystories_sample_5M.txt" ]]; then echo "  skip tests/fixtures/tinystories_sample_5M.txt"; else curl -fsSL -o "tests/fixtures/tinystories_sample_5M.txt" "https://raw.githubusercontent.com/stanford-cs336/assignment1-basics/a158843b20107949f1a8d7df1b05cd33b9166712/tests/fixtures/tinystories_sample_5M.txt"; echo "  ok tests/fixtures/tinystories_sample_5M.txt (5242880 bytes)"; fi
 mkdir -p "$(dirname "tests/fixtures/ts_tests/model.pt")"
 if [[ -f "tests/fixtures/ts_tests/model.pt" ]]; then echo "  skip tests/fixtures/ts_tests/model.pt"; else curl -fsSL -o "tests/fixtures/ts_tests/model.pt" "https://raw.githubusercontent.com/stanford-cs336/assignment1-basics/a158843b20107949f1a8d7df1b05cd33b9166712/tests/fixtures/ts_tests/model.pt"; echo "  ok tests/fixtures/ts_tests/model.pt (5623416 bytes)"; fi
+mkdir -p "$(dirname "uv.lock")"
+if [[ -f "uv.lock" ]]; then echo "  skip uv.lock"; else curl -fsSL -o "uv.lock" "https://raw.githubusercontent.com/stanford-cs336/assignment1-basics/a158843b20107949f1a8d7df1b05cd33b9166712/uv.lock"; echo "  ok uv.lock (144838 bytes)"; fi
 echo Done.
