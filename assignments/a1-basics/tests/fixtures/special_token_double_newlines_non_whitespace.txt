@@ -1,1 +1,3 @@
-<|endoftext|>\n\ntesting!
+<|endoftext|>
+
+testing!
