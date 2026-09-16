@@ -8,6 +8,7 @@ Update every Sunday. Mark: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] Complete A1–A5 in 6 weeks
 
 ## Week 1 — Tokenization, resources, A1 foundations
+- [x] Day 1 map: deliverables + adapters contract (`journals/week-01.md`)
 - [x] A1 starter at `assignments/a1-basics/` (run `scripts/fetch_large_assets.sh` before pytest)
 - [ ] Read Lec 01 (tokenization / BPE)
 - [ ] Read Lec 02 (memory, FLOPs, training loop primitives)
@@ -15,7 +16,7 @@ Update every Sunday. Mark: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] BPE encode/decode round-trip
 - [ ] ADR: AdamW state + decoupled weight decay
 - [ ] AdamW matches `torch.optim.AdamW` on a toy step
-- [ ] Journal `journals/week-01.md`
+- [x] Journal `journals/week-01.md` (Day 1 map logged)
 
 ## Week 2 — Transformer + train (finish A1)
 - [ ] Read Lec 03–04 (arch; MoE skim-only)
