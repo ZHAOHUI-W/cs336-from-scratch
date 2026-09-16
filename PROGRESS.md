@@ -41,7 +41,7 @@ Update every Sunday. Mark: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] Read Lec 09–12
 - [ ] ADR: IsoFLOP experiment design (valid loss measurement)
 - [ ] Sweep + U-curves
-- [ ] Fit \(N_\mathrm{opt}(C)\), \(D_\mathrm{opt}(C)\)
+- [ ] Fit $N_{\\mathrm{opt}}(C)$, $D_{\\mathrm{opt}}(C)$
 - [ ] Predict target budget
 - [ ] Journal week-04
 
@@ -50,7 +50,7 @@ Update every Sunday. Mark: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] ADR: streaming pipeline stages + failure modes
 - [ ] WARC → text on sample
 - [ ] Filters + language ID
-- [ ] MinHash + LSH (not \(O(N^2)\))
+- [ ] MinHash + LSH (not $O(N^2)$)
 - [ ] Journal week-05
 
 ## Week 6 — Alignment (A5)

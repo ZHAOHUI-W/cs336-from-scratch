@@ -28,7 +28,7 @@
 UTF-8 bytes → BPE merges → token IDs; encode/decode must round-trip; special tokens stay unsplit.
 
 **Loss reminder**
-Next-token CE \(-\log p(\text{correct})\); uniform over vocab \(V\) → \(\log V\).
+Next-token CE $-\log p(\text{correct})$; uniform over vocab $V$ → $\log V$.
 
 ### Bugs that taught me something
 - N/A (no coding day).
