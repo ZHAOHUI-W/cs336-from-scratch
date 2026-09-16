@@ -180,7 +180,7 @@ def numpy_snapshot(request):
 
     match_exact = request.config.getoption("--snapshot-exact", default=False)
 
-    # Create the snapshot handler
+    # Create the snapshot handler with default settings
     snapshot = NumpySnapshot(
         default_force_update=force_update, always_match_exact=match_exact, default_test_name=request.node.name
     )
@@ -296,8 +296,28 @@ def pos_ids(n_queries):
 
 # # Example usage:
 # def test_single_array(numpy_snapshot):
-#     # Function that produces a single array
-#     # custom_snapshot = NumpySnapshot()
+#     # Create a test array
+#     def my_function():
+#         return np.array([[1.0, 2.0], [3.0, 4.0001]])
+
+#     result = my_function()
+
+#     # Just provide the result - the test name will be inferred
+#     numpy_snapshot.assert_match(result)
+
+
+# def test_multiple_arrays(numpy_snapshot):
+#     # Create multiple arrays
+#     def my_function():
+#         return {
+#             "weights": np.array([0.1, 0.2, 0.3]),
+#             "biases": np.array([0.01, 0.02]),
+#             "gradients": np.array([[0.001, 0.002], [0.003, 0.004]])
+#         }
+
+#     results = my_function()
+
+#     # Provide multiple arrays to compare
 #     numpy_snapshot.assert_match(
 #         results,
 #         "my_special_test",
