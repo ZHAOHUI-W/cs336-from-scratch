@@ -3,7 +3,7 @@
 # 实现 train_bpe(...)
 # 输入: input_path, vocab_size, special_tokens
 # 输出:
-#   vocab:  dict[int, bytes]           # id → token 字节串
+#   vocab:  dict[int, bytes]           # id → token bytes 比如 {257: b'<S>', 258: b'</S>'}
 #   merges: list[tuple[bytes, bytes]]  # 按学习顺序
 # 流程: # 1. 读文件成一个大字符串
         # 2. 用 special_tokens 切开（跨边界不 merge；special 本身不进 pair 统计）

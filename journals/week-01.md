@@ -134,3 +134,93 @@ Indexes are part of the algorithm's contract: `pair_to_words` is not a micro-opt
 - Implement tokenizer **encode/decode** (`get_tokenizer`) and `tests/test_tokenizer.py`.
 
 
+
+## Day — Tokenizer encode/decode（2026-09-22）
+
+### 中文版
+
+#### 做了什么
+- 实现 `cs336_basics/tokenizer.py` 的 `Tokenizer`：`__init__`、`encode`、`decode`、`encode_iterable`。
+- 在 `tests/adapters.py` 的 `get_tokenizer` 中直接返回 `Tokenizer(vocab, merges, special_tokens)`。
+- Windows 上为 `tests/test_tokenizer.py` 做了 `resource` 可选导入（无 `RLIMIT_AS` 时跳过硬内存上限）。
+- 补齐 GPT-2 fixture（`gpt2_vocab.json` / `gpt2_merges.txt`），用于与 tiktoken 对齐的测例。
+
+#### 与 `train_bpe` 的契约
+- `train_bpe` 产出：`vocab: dict[int, bytes]`，`merges: list[tuple[bytes, bytes]]`（**按训练时的先后顺序**）。
+- Tokenizer **消费**这两样做编解码；不再学新 merge。
+- Special tokens 在训练时写入 vocab；编码时整段匹配进 id，**不**进入 BPE merge。
+
+#### encode（text → ids）
+1. **Special 切分**：按 special 字符串匹配（长的优先）；命中段直接 `bytes_to_id`；未命中的普通段进入下一步。
+2. **GPT-2 PAT pre-tokenization**：对每个普通段用与 `train_bpe` 相同的 regex 切成 pre-token。
+3. **BPE**：每个 pre-token → UTF-8 → 初始单字节序列；再 **按 `merges` 列表顺序** 把相邻 pair 合并成更长 bytes。
+4. **查表**：合并结果中每个 bytes 片段 → token id。
+
+#### decode / encode_iterable
+- `decode`：id → vocab 中的 bytes，拼接后再 UTF-8 解码（坏序列可用 `errors="replace"`）。
+- `encode_iterable`：对字符串流逐块 `encode`，再逐个 yield id（避免整文件进内存）。
+
+#### 踩坑
+- 只做「UTF-8 单字节查表」时：roundtrip 能绿，但与 tiktoken 的 id 对不齐（词被拆成字母级）。
+- `merges` 必须是有序列表，按顺序应用，不能当成「再选一次最高频 pair」。
+- `adapters.get_tokenizer` 不要嵌套同名函数导致返回 `None`；删掉重复的 `decode` / `encode_iterable`。
+
+#### 为什么 merges 必须是有序列表
+训练时学到的是「先合谁、后合谁」这条规则序列，编码必须按同一顺序重放，切分才和训练一致。
+
+每一轮选出的 pair，都是在前面那些 merge 已经发生之后的语料上统计出来的。例如先有 `(e, s)→es`，后面才可能出现 `(es, t)→est`；没有先合出 `es`，`(es, t)` 这个 pair 根本不存在。因此 merges 不是一袋互不相关的规则，而是有依赖关系的步骤列表：下标越小，越早学到，编码时也越先应用。
+
+若编码时再按「当前词里频率最高」选 pair，或把 merges 当成无序集合乱序应用，切分会和训练不同，token id 也对不齐。`list[tuple[bytes, bytes]]` 就是在保存这份顺序；`dict` / `set` 会丢掉先后。
+
+一句话：顺序是 tokenizer 的一部分；丢掉顺序等于换了一套 tokenizer。
+
+#### 验收
+- `tests/test_tokenizer.py` 中 roundtrip 与 tiktoken 对齐相关用例已通过。
+
+#### 下一步
+- TinyStories 全量 `train_bpe` 实验（压缩率等），或进入 A1 Transformer。
+
+---
+
+### English
+
+#### What I did
+- Implemented `Tokenizer` in `cs336_basics/tokenizer.py`: `__init__`, `encode`, `decode`, `encode_iterable`.
+- Wired `tests/adapters.py` `get_tokenizer` to `return Tokenizer(vocab, merges, special_tokens)`.
+- Patched `tests/test_tokenizer.py` for Windows: optional `resource` import; skip hard `RLIMIT_AS` when unavailable.
+- Fetched GPT-2 fixtures (`gpt2_vocab.json` / `gpt2_merges.txt`) for tiktoken-alignment tests.
+
+#### Contract with `train_bpe`
+- `train_bpe` returns `vocab: dict[int, bytes]` and `merges: list[tuple[bytes, bytes]]` (**in training order**).
+- The tokenizer **consumes** these for encode/decode; it does not learn new merges.
+- Specials are in `vocab`; at encode time a full special match becomes one id and does **not** enter BPE.
+
+#### encode (text → ids)
+1. **Special split** (longer first): matched specials → `bytes_to_id`; ordinary spans go next.
+2. **GPT-2 PAT pre-tokenization** on ordinary spans (same regex as `train_bpe`).
+3. **BPE**: each pre-token → UTF-8 → single-byte sequence; apply merges **in list order**.
+4. **Lookup**: each resulting bytes piece → token id.
+
+#### decode / encode_iterable
+- `decode`: id → vocab bytes, concat, then UTF-8 decode (e.g. `errors="replace"` for bad sequences).
+- `encode_iterable`: `encode` each string chunk, yield ids one-by-one (streaming).
+
+#### Pitfalls
+- Byte-only lookup: roundtrip can pass while tiktoken id alignment fails (words split to letters).
+- `merges` is an ordered list applied in sequence—not “pick highest frequency again.”
+- Do not nest a second `get_tokenizer` that returns `None`; remove duplicate `decode` / `encode_iterable`.
+
+#### Why `merges` must be an ordered list
+Training learns a *sequence* of merge rules—“who merges before whom.” Encoding must replay that same order so segmentation matches training.
+
+Each chosen pair is counted only after earlier merges have already been applied. For example `(e, s)→es` may appear first; only then can `(es, t)→est` exist. Without `es`, the pair `(es, t)` never occurs. So merges are not an unordered bag of rules but an ordered list of dependent steps: smaller index = learned earlier = applied earlier at encode time.
+
+If encode instead re-picks “highest frequency pair in the current word,” or applies merges as an unordered set, the segmentation diverges and token ids will not match. `list[tuple[bytes, bytes]]` stores that order; a `dict` or `set` would drop it.
+
+In short: order is part of the tokenizer; dropping order is a different tokenizer.
+
+#### Acceptance
+- Roundtrip and tiktoken-alignment cases in `tests/test_tokenizer.py` passed.
+
+#### Next
+- Full TinyStories `train_bpe` experiment (e.g. compression), or A1 Transformer.
