@@ -193,3 +193,10 @@ In short: order is part of the tokenizer; dropping order is a different tokenize
 #### Next
 - §3.4 RMSNorm.
 - Small cleanup: unused `math` / `einsum` imports in `embedding.py`; dead `raise NotImplementedError` after `return` in `run_embedding`.
+#### Recall questions
+1. **Does the same token get the same embedding at different positions? How does the model tell positions apart?**
+   - My answer: same vector; positions are told apart by the index.
+   - Correction: same vector ✅. But the index only selects *which* token, not *where* it sits, so the Embedding layer knows nothing about position. In A1, position comes from RoPE (rotary position embedding) in attention: Q and K are rotated by position, so the same word at position 1 vs 5 yields different attention scores.
+2. **Why does Embedding init use std=1 while Linear uses √(2/(d_in+d_out))?**
+   - My answer: keep signal scale roughly constant in forward and backward passes; wider inputs get smaller σ.
+   - Correction: the Linear part is right ✅. Missing the Embedding part: a Linear output sums d_in input×weight terms, so variance grows with width and weights must shrink; an Embedding just fetches one row with no summation, so variance does not grow with width and unit scale (std=1) is fine.

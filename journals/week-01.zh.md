@@ -161,3 +161,10 @@
 #### 下一步
 - §3.4 RMSNorm。
 - 小清理：`embedding.py` 中未使用的 `math` / `einsum` import；`run_embedding` 里 `return` 之后多余的 `raise NotImplementedError`。
+#### 回忆题
+1. **同一个 token 出现在序列的不同位置，Embedding 输出的向量一样吗？模型靠什么区分位置？**
+   - 我的答案：一样；靠索引区分。
+   - 订正：向量一样 ✅。但索引只选「哪个 token」，不管它排第几位，所以 Embedding 层完全不知道位置。A1 里位置信息靠注意力中的 RoPE（旋转位置编码）：按位置旋转 Q 和 K，同一个词在第 1 位和第 5 位算出的注意力分数不同。
+2. **为什么 Embedding 初始化用 std=1，而 Linear 要用 √(2/(d_in+d_out))？**
+   - 我的答案：让信号在前向和反向传播时尺度大致保持不变，输入越宽，σ 越小。
+   - 订正：Linear 部分对 ✅。补 Embedding 部分：Linear 的输出要把 d_in 个「输入×权重」加起来，项越多方差越大，所以权重按宽度缩小；Embedding 只是取出一行，不做求和，方差不随宽度变大，所以每个数直接用单位尺度（std=1）。
