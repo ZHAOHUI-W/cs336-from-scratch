@@ -133,3 +133,31 @@
 #### 下一步
 - 若追 &lt;2 min hint：分段计时 + 视情况再优 merge / worker 数。
 - Handout 下一题：`train_bpe_expts_owt`（vocab 32k），或进入 Transformer。
+
+
+## Day — Linear 与 Embedding（2026-10-12 ~ 2026-10-23）
+
+#### 做了什么
+- §3.3.2 Linear（无 bias）：`cs336_basics/linear.py` + `adapters.run_linear`。
+- §3.3.3 Embedding：`cs336_basics/embedding.py` + `adapters.run_embedding`。
+- 修测试收集报错：`pretokenization_example.py` 的演示代码放进 `if __name__ == "__main__":`，避免 pytest 导入时执行 `open(...)`。
+
+#### 容易弄混的概念
+1. **权重形状**：Linear 存 `(d_out, d_in)`，前向是 `y = x Wᵀ`；Embedding 存 `(vocab_size, d_model)`，第 i 行就是 token i 的向量。两者不是同一种操作。
+2. **Embedding 的 forward 是查表，不是矩阵乘法**：`self.weight[token_ids]`。用 einsum 会把 token id 当成数值去加权求和，结果是错的。输出形状 = `token_ids` 的形状 + `d_model`，例如 `(1, 3)` 进、`(1, 3, d_model)` 出。
+3. **圆括号 vs 方括号**：`self.weight(token_ids)` 是把 Parameter 当函数调用，会报 `'Parameter' object is not callable`；取行要用方括号索引。
+4. **einops.einsum 参数顺序**：先传张量，pattern 字符串放最后。
+5. **初始化**：Linear 用截断正态，σ² = 2/(d_in+d_out)，截断在 ±3σ，目的是让前向和反向的信号尺度大致不变（输入越宽，σ 越小）。Embedding 用 N(0,1) 截断到 [-3, 3]。Embedding 只是查表，不会对 d_in 个输入求和，所以没有"方差随宽度累积"的问题，std=1 就行。
+6. **位置信息**：同一个 token 在不同位置拿到的 embedding 完全相同（索引本身不区分位置）。A1 里位置信息靠后面注意力中的 RoPE（旋转位置编码）加入。
+7. **Embedding 表要训练**：它是 `nn.Parameter`，和其他参数一起被优化器更新；每一步只有 batch 里出现过的 token 那几行拿到梯度。Embedding 和 LM head 是两套独立参数（A1 不做 weight tying）。
+8. **adapter 的作用**：测试只调用 `adapters.run_*`；adapter 负责建你的模块、把测试给的权重写进 `.data`、再调 `forward`。
+9. **测试依赖**：缺 `tests/fixtures/ts_tests/model.pt` 时先跑 `scripts/fetch_large_assets.sh`。
+10. **参数命名**：Embedding 参数命名为 `weight`（不是 `weights`），后面整模型 `load_state_dict` 需要名字对上。
+
+#### 验收
+- `uv run pytest -k test_linear`：PASSED。
+- `uv run pytest -k test_embedding`：PASSED。
+
+#### 下一步
+- §3.4 RMSNorm。
+- 小清理：`embedding.py` 中未使用的 `math` / `einsum` import；`run_embedding` 里 `return` 之后多余的 `raise NotImplementedError`。

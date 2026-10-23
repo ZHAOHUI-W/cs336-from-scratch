@@ -11,6 +11,8 @@ from torch import Tensor
 
 from cs336_basics.train_bpe_multiprocessing_buckets import train_bpe
 from cs336_basics.tokenizer import Tokenizer
+from cs336_basics.linear import LinearNoBias
+from cs336_basics.embedding import EmbeddingLayer
 def run_linear(
     d_in: int,
     d_out: int,
@@ -29,8 +31,9 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
+    linear = LinearNoBias(d_in=weights.shape[1], d_out=weights.shape[0])
+    linear.weight.data = weights
+    return linear(in_features)
 
 
 def run_embedding(
@@ -51,6 +54,9 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
+    embedding = EmbeddingLayer(num_embeddings=weights.shape[0], embedding_dim=weights.shape[1])
+    embedding.weight.data = weights
+    return embedding(token_ids)
 
     raise NotImplementedError
 

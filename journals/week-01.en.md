@@ -165,3 +165,31 @@ In short: order is part of the tokenizer; dropping order is a different tokenize
 
 #### Next
 - Optional: chase &lt;2 min hint; then OWT 32k BPE or Transformer.
+
+
+## Day — Linear and Embedding (2026-10-12 to 2026-10-23)
+
+#### What I did
+- §3.3.2 Linear (no bias): `cs336_basics/linear.py` + `adapters.run_linear`.
+- §3.3.3 Embedding: `cs336_basics/embedding.py` + `adapters.run_embedding`.
+- Fixed a pytest collection error: moved the demo code in `pretokenization_example.py` under `if __name__ == "__main__":` so importing it no longer runs `open(...)`.
+
+#### Easy-to-confuse concepts
+1. **Weight shapes**: Linear stores `(d_out, d_in)` and computes `y = x Wᵀ`; Embedding stores `(vocab_size, d_model)`, where row i is the vector for token i. They are different operations.
+2. **Embedding forward is a lookup, not a matmul**: `self.weight[token_ids]`. An einsum would treat token ids as numeric weights and sum rows, which is wrong. Output shape = shape of `token_ids` + `d_model`, e.g. `(1, 3)` in, `(1, 3, d_model)` out.
+3. **Parentheses vs brackets**: `self.weight(token_ids)` calls the Parameter like a function and raises `'Parameter' object is not callable`; use bracket indexing to fetch rows.
+4. **einops.einsum argument order**: tensors first, pattern string last.
+5. **Initialization**: Linear uses truncated normal with σ² = 2/(d_in+d_out), truncated at ±3σ, to keep forward and backward signal scale roughly constant (wider layers get smaller σ). Embedding uses N(0,1) truncated to [-3, 3]. A lookup does not sum over d_in inputs, so there is no variance build-up with width, and std=1 is fine.
+6. **Position**: the same token gets the identical embedding at every position (indexing does not encode position). In A1, position enters later via RoPE (rotary position embedding) inside attention.
+7. **The embedding table is trained**: it is an `nn.Parameter` updated by the optimizer; each step only rows for tokens present in the batch get gradients. Embedding and the LM head are separate parameters (no weight tying in A1).
+8. **What the adapter does**: tests only call `adapters.run_*`; the adapter builds my module, copies the test weights into `.data`, and calls `forward`.
+9. **Test assets**: if `tests/fixtures/ts_tests/model.pt` is missing, run `scripts/fetch_large_assets.sh` first.
+10. **Parameter name**: name the Embedding parameter `weight` (not `weights`) so later full-model `load_state_dict` keys match.
+
+#### Verification
+- `uv run pytest -k test_linear`: PASSED.
+- `uv run pytest -k test_embedding`: PASSED.
+
+#### Next
+- §3.4 RMSNorm.
+- Small cleanup: unused `math` / `einsum` imports in `embedding.py`; dead `raise NotImplementedError` after `return` in `run_embedding`.
