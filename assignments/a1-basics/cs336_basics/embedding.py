@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-import math
-from einops import einsum
+
 
 class EmbeddingLayer(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):

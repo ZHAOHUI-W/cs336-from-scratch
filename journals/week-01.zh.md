@@ -168,3 +168,53 @@
 2. **为什么 Embedding 初始化用 std=1，而 Linear 要用 √(2/(d_in+d_out))？**
    - 我的答案：让信号在前向和反向传播时尺度大致保持不变，输入越宽，σ 越小。
    - 订正：Linear 部分对 ✅。补 Embedding 部分：Linear 的输出要把 d_in 个「输入×权重」加起来，项越多方差越大，所以权重按宽度缩小；Embedding 只是取出一行，不做求和，方差不随宽度变大，所以每个数直接用单位尺度（std=1）。
+
+## Day — RMSNorm 与 SwiGLU（2026-10-23 ~ 2026-10-24）
+
+#### 做了什么
+- §3.4.1 RMSNorm：`cs336_basics/rmsnorm.py` + `adapters.run_rmsnorm`。
+- §3.4.2 SwiGLU 前馈网络：`cs336_basics/swiglu.py`（模块级 `silu` 函数 + `SwiGlu` 模块）+ `adapters.run_silu` / `adapters.run_swiglu`。
+- 小清理：删掉 `embedding.py` 里没用到的 `math` / `einsum` import。
+
+#### 常犯的小错误
+1. **`super.__init__()` 少了括号**：要写 `super().__init__()`。少了括号不会调用父类初始化，后面注册参数时就会出错。
+2. **`device` / `dtype` 接收了却没往下传**：RMSNorm 和 SwiGLU 都犯过。`__init__` 收了这两个参数，就要传给 `torch.ones(...)` 或子模块 `LinearNoBias(..., device=device, dtype=dtype)`，不能写死成 `None`。
+3. **笔误 `x ** x`**：平方是 `x ** 2`。这种错误不报错，只会算出错误结果。
+4. **`math.*` 处理不了张量**：`math.sqrt`、`math.sigmoid`（后者根本不存在）只能算单个 Python 数字。张量要用 `torch.sqrt`、`torch.sigmoid`。
+5. **adapter 传错参数**：`run_rmsnorm` 一开始把权重张量当成 `d_model` 传进去，`torch.ones()` 报 TypeError。先建模块（传维度），再装权重（传张量），两件事不要混在一起。
+6. **对模块再写 einsum**：`self.w1` 是 `LinearNoBias` 模块，它的 forward 里已经做了 einsum，直接 `self.w1(x)` 调用就行。`silu.einsum(...)` 这种写法不成立。
+7. **`@` 和 `*` 混用**：公式里的 ⊙ 是逐元素相乘，对应 `*`；`@` 是矩阵乘法。
+8. **权重装错层级**：`swiglu.w1 = w1_weight` 是想把整个子模块换成张量；正确做法是 `swiglu.w1.weight.data = w1_weight`，装进子模块里的参数。
+
+#### 值得注意的地方
+1. **RMSNorm 公式**：`x / sqrt(mean(x²) + eps) * g`。和 LayerNorm 相比，不减均值，也没有偏置 β。eps 放在根号里面，防止除以 0。
+2. **`keepdim=True`**：沿 `dim=-1`（d_model）求平均后要保留这一维，形状从 `(B, S, d)` 变成 `(B, S, 1)`，才能和 x 正确广播。漏了它，形状不匹配时会报错；但碰巧 `S == d_model` 时**不报错，结果却是错的**。
+3. **先升到 float32 再降回来**：先记下 `in_dtype = x.dtype`，用 float32 计算平方和平均，避免低精度（如 bf16）下平方溢出或丢精度，最后 `.to(in_dtype)` 转回原类型。
+4. **g 初始化为 1**：一开始不改变尺度，之后由训练去学。参数名用 `weight`，和后面 `load_state_dict` 的 key 对上。
+5. **SiLU 和 ReLU 的区别**：SiLU(x) = x·σ(x)，处处平滑；负数区会给出小的负值（最低约 -0.28），梯度也不为 0。ReLU 在负数区输出和梯度都是 0。
+6. **门控**：SiLU(W1x) 是门，W3x 是内容。门的某一维接近 0，那一维的输出就接近 0，不管内容是多少。门由输入算出来，所以每个 token 自己决定开关哪些维度。
+7. **为什么 d_ff ≈ 8/3·d_model**：普通 FFN 有 2 个 d×4d 矩阵，合计 8d²；SwiGLU 有 3 个矩阵，令 3·d·d_ff = 8d²，得 d_ff = 8d/3，总参数量保持一样。再取到 64 的倍数，方便 GPU 计算。
+8. **无参数的函数写在模块外面**：SiLU 没有可学习参数，不放进 `__init__`，写成模块级函数；`run_silu` 可以直接 import 来用。
+9. **子模块命名 `w1` / `w2` / `w3`**：后面整模型加载权重时，key 会是 `...ffn.w1.weight` 这种格式，名字要对上。
+10. **不报错 ≠ 算对了**：`keepdim` 漏掉、`@` 碰上 `S == d_ff`，都可能静默出错。所以每个模块都要有测试兜底。
+
+#### 验收
+- `uv run pytest -k test_rmsnorm`：PASSED。
+- `uv run pytest -k "test_swiglu or test_silu"`：2 passed。
+
+#### 回忆题
+1. **漏了 `keepdim=True` 会怎样？**
+   - 我的答案：会把求平均的那一维消掉。
+   - 订正：对 ✅。后果是形状对不上时报错；碰巧 `S == d_model` 时不报错，但会按错误的维度广播，结果是错的。
+2. **RMSNorm 和 LayerNorm 有什么区别？**
+   - 我的答案：一个在进入 attention 前归一化，一个在出来的时候归一化？
+   - 订正：这说的是 pre-norm 和 post-norm 的区别（norm 放在哪里），不是 RMSNorm 和 LayerNorm 的区别。RMSNorm 不减均值、没有偏置 β，只按 RMS 缩放；LayerNorm 先减均值再除以标准差，还有 β。
+3. **`swiglu.w1 = w1_weight` 和 `swiglu.w1.weight.data = w1_weight` 有什么区别？**
+   - 我的答案：一个是取模块，一个是取模块内矩阵的权重值。
+   - 订正：对 ✅。前者是想用张量替换整个子模块，后者才是把数据装进子模块的参数里。
+4. **把 `*` 换成 `@`，在 `(B, S, d_ff)` 上会怎样？**
+   - 我的答案：会做内积或矩阵乘，直接报形状错误。
+   - 订正：基本对 ✅。`@` 比较的是前者最后一维 `d_ff` 和后者倒数第二维 `S`：不相等时报错；碰巧 `S == d_ff` 时不报错，但结果是错的。
+
+#### 下一步
+- §3.4.3 RoPE（旋转位置编码）。

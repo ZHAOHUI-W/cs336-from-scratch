@@ -200,3 +200,53 @@ In short: order is part of the tokenizer; dropping order is a different tokenize
 2. **Why does Embedding init use std=1 while Linear uses √(2/(d_in+d_out))?**
    - My answer: keep signal scale roughly constant in forward and backward passes; wider inputs get smaller σ.
    - Correction: the Linear part is right ✅. Missing the Embedding part: a Linear output sums d_in input×weight terms, so variance grows with width and weights must shrink; an Embedding just fetches one row with no summation, so variance does not grow with width and unit scale (std=1) is fine.
+
+## Day — RMSNorm and SwiGLU (2026-10-23 ~ 2026-10-24)
+
+#### What I did
+- §3.4.1 RMSNorm: `cs336_basics/rmsnorm.py` + `adapters.run_rmsnorm`.
+- §3.4.2 SwiGLU feed-forward: `cs336_basics/swiglu.py` (module-level `silu` function + `SwiGlu` module) + `adapters.run_silu` / `adapters.run_swiglu`.
+- Small cleanup: removed unused `math` / `einsum` imports from `embedding.py`.
+
+#### Common small mistakes
+1. **`super.__init__()` missing parentheses**: must be `super().__init__()`. Without them the parent init never runs, and registering parameters fails later.
+2. **Accepting `device` / `dtype` but not passing them on**: happened in both RMSNorm and SwiGLU. If `__init__` takes them, pass them to `torch.ones(...)` or to submodules `LinearNoBias(..., device=device, dtype=dtype)`; never hardcode `None`.
+3. **Typo `x ** x`**: squaring is `x ** 2`. This kind of bug raises no error and just computes the wrong result.
+4. **`math.*` cannot handle tensors**: `math.sqrt` and `math.sigmoid` (which does not even exist) work on single Python numbers only. For tensors use `torch.sqrt`, `torch.sigmoid`.
+5. **Wrong argument in the adapter**: `run_rmsnorm` first passed the weights tensor as `d_model`, so `torch.ones()` raised a TypeError. Build the module (pass dimensions) and load the weights (pass tensors) as two separate steps.
+6. **Writing einsum on a module**: `self.w1` is a `LinearNoBias` module whose forward already does the einsum, so just call `self.w1(x)`. `silu.einsum(...)` is not valid.
+7. **Mixing up `@` and `*`**: the ⊙ in the formula is elementwise multiplication, i.e. `*`; `@` is matrix multiplication.
+8. **Loading weights at the wrong level**: `swiglu.w1 = w1_weight` tries to replace the whole submodule with a tensor; the right way is `swiglu.w1.weight.data = w1_weight`, which loads into the submodule's parameter.
+
+#### Things worth noting
+1. **RMSNorm formula**: `x / sqrt(mean(x²) + eps) * g`. Compared with LayerNorm, there is no mean subtraction and no bias β. eps goes inside the square root to avoid division by zero.
+2. **`keepdim=True`**: after averaging over `dim=-1` (d_model), keep that dimension so the shape goes from `(B, S, d)` to `(B, S, 1)` and broadcasts correctly with x. Without it you get an error when shapes mismatch, but when `S == d_model` by coincidence there is **no error and the result is silently wrong**.
+3. **Upcast to float32, then cast back**: record `in_dtype = x.dtype`, compute the square and mean in float32 to avoid overflow or precision loss in low precision (e.g. bf16), then `.to(in_dtype)` at the end.
+4. **g initialized to ones**: no rescaling at the start; training learns it. Name the parameter `weight` so it matches `load_state_dict` keys later.
+5. **SiLU vs ReLU**: SiLU(x) = x·σ(x) is smooth everywhere; in the negative region it gives small negative values (minimum about -0.28) with nonzero gradient. ReLU outputs 0 with 0 gradient for all negatives.
+6. **Gating**: SiLU(W1x) is the gate and W3x is the content. When a gate dimension is near 0, that output dimension is near 0 regardless of the content. The gate is computed from the input, so each token decides which dimensions to open or close.
+7. **Why d_ff ≈ 8/3·d_model**: a plain FFN has 2 matrices of d×4d, 8d² in total; SwiGLU has 3 matrices, so setting 3·d·d_ff = 8d² gives d_ff = 8d/3 and keeps the parameter count the same. Then round to a multiple of 64 for efficient GPU computation.
+8. **Parameter-free functions live outside the module**: SiLU has no learnable parameters, so it does not go in `__init__`; it is a module-level function that `run_silu` can import directly.
+9. **Submodule names `w1` / `w2` / `w3`**: when loading full-model weights later, keys look like `...ffn.w1.weight`, so the names must match.
+10. **No error ≠ correct**: a missing `keepdim` or `@` with `S == d_ff` can both fail silently. That is why every module needs a test behind it.
+
+#### Verification
+- `uv run pytest -k test_rmsnorm`: PASSED.
+- `uv run pytest -k "test_swiglu or test_silu"`: 2 passed.
+
+#### Recall questions
+1. **What happens if `keepdim=True` is missing?**
+   - My answer: the averaged dimension gets removed.
+   - Correction: right ✅. The consequence is an error when shapes mismatch, or, when `S == d_model` by coincidence, no error but broadcasting along the wrong dimension and a wrong result.
+2. **How does RMSNorm differ from LayerNorm?**
+   - My answer: one normalizes before entering attention, the other after coming out?
+   - Correction: that describes pre-norm vs post-norm (where the norm sits), not RMSNorm vs LayerNorm. RMSNorm does not subtract the mean and has no bias β; it only scales by the RMS. LayerNorm subtracts the mean, divides by the standard deviation, and has β.
+3. **What is the difference between `swiglu.w1 = w1_weight` and `swiglu.w1.weight.data = w1_weight`?**
+   - My answer: one refers to the module, the other to the weight values of the matrix inside the module.
+   - Correction: right ✅. The first tries to replace the whole submodule with a tensor; only the second loads the data into the submodule's parameter.
+4. **What happens if `*` is replaced with `@` on `(B, S, d_ff)`?**
+   - My answer: it does an inner product or matrix multiply and raises a shape error.
+   - Correction: mostly right ✅. `@` compares the first operand's last dim `d_ff` with the second's second-to-last dim `S`: an error when they differ, but when `S == d_ff` by coincidence there is no error and the result is wrong.
+
+#### Next
+- §3.4.3 RoPE (rotary position embedding).
