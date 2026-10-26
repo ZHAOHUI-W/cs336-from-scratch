@@ -218,3 +218,43 @@
 
 #### 下一步
 - §3.4.3 RoPE（旋转位置编码）。
+
+## Day — RoPE 旋转位置编码（2026-10-24 ~ 2026-10-26）
+
+#### 做了什么
+- §3.4.3 RoPE：`cs336_basics/rope.py`（`RoPE(theta, d_k, max_seq_len, device)`）+ `adapters.run_rope`。
+
+#### 常犯的小错误
+1. **`arange` 终点多减了 1**：`arange` 本来就不包含终点。`arange(0, d_k-2, 2)` 会少掉最后一组，`arange(0, max_seq_len-1)` 会少掉最后一个位置。终点直接写 `d_k`、`max_seq_len`。
+2. **外积写成 `*`**：频率 `(d_k/2,)` 和位置 `(max_seq_len,)` 用 `*` 相乘，长度不同会报错，长度碰巧相同则会逐元素相乘、静默算错。要用 `torch.outer(位置, 频率)`，位置在前，作为行。
+3. **`torch.outer([a], [b])` 多了方括号**：外面套一层方括号就变成 Python 列表，`outer` 要的是一维张量。
+4. **新建张量没给 `dtype` / `device`**：位置向量要和频率在同一设备上，并且是 float。
+5. **用 `arange` 代替从 x 切片**：`x1 = torch.arange(...)` 是新造了一串位置编号，和输入无关。要旋转的是 x 本身：`x[..., 0::2]`、`x[..., 1::2]`。
+6. **用了 `__init__` 里没存的属性**：`self.max_seq_len` 从来没有赋值过，运行会报 AttributeError。
+7. **查表结果没赋值**：`self.cos[token_positions]` 单独一行，算完就丢了。
+8. **调用 forward 少传参数**：`rope(token_positions)` 把位置当成了 x，要写 `rope(in_query_or_key, token_positions)`。
+
+#### 值得注意的地方
+1. **核心思想**：不加位置向量，而是把 q、k 每相邻两个数看成平面上的点，按位置旋转。(a, b) 旋转 θ 后变成 (a·cosθ − b·sinθ, a·sinθ + b·cosθ)。
+2. **为什么是相对位置**：q 转 iθ，k 转 jθ，点积只取决于 q、k 的内容和距离 j−i。位置 (3, 5) 和 (100, 102) 的分数一样。
+3. **为什么需要位置信息**：注意力是加权求和，与顺序无关；Embedding、FFN、RMSNorm 都逐位置独立计算。不注入位置，「狗咬人」和「人咬狗」对模型来说没有区别。
+4. **频率**：第 k 组是 1/Θ^((2k−2)/d)，分子是 0, 2, …, d−2，即 `arange(0, d_k, 2)`。d=4、Θ=10000 时为 [1, 0.01]。前面的组转得快，分辨近距离；后面的组转得慢，编码远距离。
+5. **cos/sin 表形状**：`(max_seq_len, d_k/2)`，每个位置、每一组各一个角度。用 `token_positions` 直接索引，得到 `(..., seq_len, d_k/2)`，和 Embedding 查表同一个思路。
+6. **`register_buffer(..., persistent=False)`**：buffer 不训练，但属于模块，会跟着 `.to(device)` 一起搬；`persistent=False` 表示不存进 `state_dict`，因为随时能重算，而且官方权重里也没有这两个 key。
+7. **相邻配对，不是前后两半**：handout 规定 (x₀, x₁)、(x₂, x₃)…… 一组，所以用 `0::2` / `1::2` 切片。按 `:d/2` / `d/2:` 拆是 GPT-NeoX 那种配对，测试会对不上。
+8. **交错拼回**：`torch.stack((out1, out2), dim=-1)` 得到 `(..., d_k/2, 2)`，再 `flatten(-2)` 得到 `(..., d_k)`。例：[a, c] 和 [b, d] → [[a, b], [c, d]] → [a, b, c, d]。
+9. **写 MHA 时的坑**：x 会多一个 head 维 `(batch, heads, seq, d_k)`，而查表结果是 `(batch, seq, d_k/2)`。广播从右往左对齐，batch 会去对 heads，需要给 cos/sin 补 head 维。
+
+#### 验收
+- `uv run pytest -k test_rope`：PASSED。
+
+#### 回忆题
+1. **为什么用 `x[..., 0::2]` 和 `x[..., 1::2]`，而不是 `x[..., :d/2]` 和 `x[..., d/2:]`？**
+   - 我的答案：因为要取每组里面的两个。
+   - 订正：对 ✅。handout 规定相邻两个一组；按前后两半拆会配成 (x₀, x_{d/2})，是另一种约定（GPT-NeoX），测试对不上。
+2. **`token_positions` 是 `(batch, seq_len)` 时，`self.cos[token_positions]` 是什么形状？为什么能和 `x1` 直接相乘？**
+   - 我的答案：`(batch, seq_len, d_k/2)`，`x1` 也是 `(batch, seq_len, d_k/2)`，形状一样。
+   - 订正：对 ✅。注意到了 MHA 会多出 head 维，届时需要补维度才能广播。
+
+#### 下一步
+- §3.4.4 softmax（减最大值保证数值稳定），然后 scaled dot-product attention。

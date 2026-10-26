@@ -15,6 +15,7 @@ from cs336_basics.linear import LinearNoBias
 from cs336_basics.embedding import EmbeddingLayer
 from cs336_basics.rmsnorm import RMSNorm
 from cs336_basics.swiglu import SwiGlu,silu
+from cs336_basics.rope import RoPE
 def run_linear(
     d_in: int,
     d_out: int,
@@ -216,6 +217,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
+    rope = RoPE(theta=theta, max_seq_len=max_seq_len,d_k=d_k)
+    return rope(in_query_or_key,token_positions)
     raise NotImplementedError
 
 

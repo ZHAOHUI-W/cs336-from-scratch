@@ -250,3 +250,43 @@ In short: order is part of the tokenizer; dropping order is a different tokenize
 
 #### Next
 - §3.4.3 RoPE (rotary position embedding).
+
+## Day — RoPE rotary position embedding (2026-10-24 ~ 2026-10-26)
+
+#### What I did
+- §3.4.3 RoPE: `cs336_basics/rope.py` (`RoPE(theta, d_k, max_seq_len, device)`) + `adapters.run_rope`.
+
+#### Common small mistakes
+1. **Subtracting 1 from the `arange` end**: `arange` already excludes the end. `arange(0, d_k-2, 2)` drops the last pair and `arange(0, max_seq_len-1)` drops the last position. Use `d_k` and `max_seq_len` as the end.
+2. **Writing the outer product as `*`**: frequencies `(d_k/2,)` times positions `(max_seq_len,)` with `*` errors when lengths differ, and silently multiplies elementwise when they happen to match. Use `torch.outer(positions, freqs)`, positions first so they become rows.
+3. **Extra brackets in `torch.outer([a], [b])`**: the brackets turn tensors into Python lists; `outer` needs 1-D tensors.
+4. **New tensors without `dtype` / `device`**: the position vector must be float and on the same device as the frequencies.
+5. **Using `arange` instead of slicing x**: `x1 = torch.arange(...)` creates position numbers unrelated to the input. What gets rotated is x itself: `x[..., 0::2]`, `x[..., 1::2]`.
+6. **Using an attribute never stored in `__init__`**: `self.max_seq_len` was never assigned, which raises AttributeError.
+7. **Lookup result not assigned**: `self.cos[token_positions]` on its own line is computed and thrown away.
+8. **Too few arguments to forward**: `rope(token_positions)` treats the positions as x; it must be `rope(in_query_or_key, token_positions)`.
+
+#### Things worth noting
+1. **Core idea**: instead of adding a position vector, treat each adjacent pair in q and k as a point in a plane and rotate it by position. (a, b) rotated by θ becomes (a·cosθ − b·sinθ, a·sinθ + b·cosθ).
+2. **Why it is relative**: q rotates by iθ and k by jθ, so the dot product depends only on the contents of q, k and the distance j−i. Positions (3, 5) and (100, 102) give the same score.
+3. **Why position info is needed**: attention is a weighted sum, which ignores order; Embedding, FFN and RMSNorm all work per position. Without injected position, "dog bites man" and "man bites dog" look the same to the model.
+4. **Frequencies**: group k uses 1/Θ^((2k−2)/d); the numerators are 0, 2, …, d−2, i.e. `arange(0, d_k, 2)`. For d=4, Θ=10000 this gives [1, 0.01]. Early groups rotate fast and resolve short distances; later groups rotate slowly and encode long distances.
+5. **cos/sin table shape**: `(max_seq_len, d_k/2)`, one angle per position per pair. Index it directly with `token_positions` to get `(..., seq_len, d_k/2)`, the same idea as the Embedding lookup.
+6. **`register_buffer(..., persistent=False)`**: a buffer is not trained but belongs to the module and moves with `.to(device)`; `persistent=False` keeps it out of `state_dict`, since it can be recomputed any time and the official weights do not contain these keys.
+7. **Adjacent pairs, not two halves**: the handout pairs (x₀, x₁), (x₂, x₃), …, hence `0::2` / `1::2` slicing. Splitting by `:d/2` / `d/2:` is the GPT-NeoX pairing and will not match the tests.
+8. **Interleaving back**: `torch.stack((out1, out2), dim=-1)` gives `(..., d_k/2, 2)`, then `flatten(-2)` gives `(..., d_k)`. Example: [a, c] and [b, d] → [[a, b], [c, d]] → [a, b, c, d].
+9. **Pitfall for MHA**: x will gain a head dim `(batch, heads, seq, d_k)` while the lookup is `(batch, seq, d_k/2)`. Broadcasting aligns from the right, so batch would line up against heads; cos/sin will need an extra head dim.
+
+#### Verification
+- `uv run pytest -k test_rope`: PASSED.
+
+#### Recall questions
+1. **Why slice with `x[..., 0::2]` and `x[..., 1::2]` instead of `x[..., :d/2]` and `x[..., d/2:]`?**
+   - My answer: because we need to take the two elements within each pair.
+   - Correction: right ✅. The handout pairs adjacent elements; splitting into halves would pair (x₀, x_{d/2}), a different convention (GPT-NeoX) that will not match the tests.
+2. **When `token_positions` is `(batch, seq_len)`, what is the shape of `self.cos[token_positions]`, and why can it multiply `x1` directly?**
+   - My answer: `(batch, seq_len, d_k/2)`, and `x1` is also `(batch, seq_len, d_k/2)`, so the shapes match.
+   - Correction: right ✅. Note that MHA adds a head dim, which will require an extra dimension for broadcasting.
+
+#### Next
+- §3.4.4 softmax (subtract the max for numerical stability), then scaled dot-product attention.
