@@ -258,3 +258,72 @@
 
 #### 下一步
 - §3.4.4 softmax（减最大值保证数值稳定），然后 scaled dot-product attention。
+## Day — softmax、缩放点积注意力与多头自注意力（2026-10-26）
+
+#### 做了什么
+- §3.4.4 softmax：`cs336_basics/nn_utils.py` 的 `softmax(x, dim)` 和 `adapters.run_softmax`。
+- §3.4.4 缩放点积注意力（SDPA，scaled dot-product attention）：`nn_utils.scaled_dot_product_attention(Q, K, V, mask)` 和 `adapters.run_scaled_dot_product_attention`。
+- §3.4.5 因果多头自注意力（MHA，multi-head self-attention）：`cs336_basics/attention.py` 的 `MultiHeadSelfAttention`，以及 `adapters.run_multihead_self_attention`。
+- 带 RoPE 的 MHA：构造时可选传入 `theta` / `max_seq_len`，对应 `adapters.run_multihead_self_attention_with_rope`。
+
+#### 常犯的小错误
+1. **又忘了接 adapter（这一节出现了 4 次）**：每写完一个模块，`tests/adapters.py` 里对应的函数都要 import 并把 `raise NotImplementedError` 换成实现。说"写好了"之前先检查这一步。`return` 后面残留的 `raise` 也要顺手删掉。
+2. **softmax 把 `dim` 写死成 -1**：函数有 `dim` 参数，就要用它。
+3. **softmax 求和对象写错**：分母要对 exp 之后的值求和，不是对原始 x 求和。`torch.exp` 只接一个张量，不接 `dim` / `keepdim`。
+4. **`torch.max(..., dim)` 返回的是 (values, indices)**：要取 `.values`，或者直接用 `amax`。`torch.sum` 返回的就是张量，后面不能再接 `.values`。
+5. **`torch.sqrt` 用在 int 上**：`Q.shape[-1]` 是 Python 整数，不是张量，要用 `math.sqrt`。
+6. **把维度大小当成维度编号**：softmax 的 `dim` 要写 `-1`（维度编号），不是 `K.shape[-1]`（维度大小）。
+7. **`masked_fill` 的填充值写成了 `scores`**：应该填 `float('-inf')`，并且只在 `mask is not None` 时才做。
+8. **成员没加 `self.`**：`q_proj = LinearNoBias(...)` 只是局部变量，不会注册成子模块，forward 里也访问不到。
+9. **`/` 和 `//` 混用**：`d_k = d_model / num_heads` 得到的是 float，要用 `//`。
+10. **einops 模式写了逗号**：`"... h s d -> ... s (h d)"` 里没有逗号；逗号只在 einsum 里分隔多个输入。
+11. **漏了 `output_proj`**：多头拼回去之后还要再乘一次 W_O。
+12. **adapter 加载权重错误（第二次了）**：`LinearNoBias(...)(q_proj_weight)` 是调用 forward，把权重当输入去乘一个随机矩阵。正确写法是 `mha.q_proj.weight.data = q_proj_weight`。
+13. **RoPE 被无条件覆盖**：`self.rope = RoPE(...)` 下一行紧跟 `self.rope = None`，要写成 if/else。
+14. **`theta and max_seq_len is not None` 的优先级**：实际含义是 `theta and (max_seq_len is not None)`，两边都要写 `is not None`。
+15. **RoPE 放在切头之前**：此时最后一维是 d_model，而 RoPE 表是按 d_k 建的，要先切头再旋转。
+16. **默认位置用了 `x.shape[-1]`**：那是 d_model，序列长度是 `x.shape[-2]`；张量还要放在 `x.device` 上，`forward` 里没有叫 `device` 的变量。
+17. **`unsqueeze` 没接住返回值**：它不是原地操作，要写 `token_positions = token_positions.unsqueeze(-2)`。
+
+#### 值得注意的地方
+1. **softmax 减最大值**：e^x 在 x 大于约 88 时会溢出（float32）。每个元素减去同一个常数，结果不变，所以先减最大值，`keepdim=True` 保证能广播回去。
+2. **注意力的 softmax 沿 key 维（最后一维）做**：每个 query 对所有 key 的权重加起来等于 1。
+3. **为什么除以 √d_k**：q、k 各分量方差为 1 时，q·k 的方差是 d_k。分数太大会让 softmax 饱和成接近 one-hot，梯度接近 0。除以 √d_k 把方差拉回 1。
+4. **mask 约定**：True 表示可以看，False 表示屏蔽。用 `masked_fill(~mask, -inf)`，softmax 后这些位置为 0。如果一整行都是 False，会全是 -inf，结果是 NaN。
+5. **因果 mask**：`torch.tril(torch.ones(S, S, dtype=torch.bool, device=x.device))`，下三角为 True，第 i 个 token 只能看到 0 到 i。
+6. **einsum 里转置不用 `.T`**：直接给维度起名字，`"... m d, ... n d -> ... m n"` 就是 QKᵀ。用 `@` 时写 `transpose(-2, -1)`，`.T` 会把 batch 维也反转。
+7. **一次投影再切头**：一个 `(d_model, d_model)` 的大矩阵，数学上等价于把每个头的小矩阵拼在一起，但只需一次矩阵乘，更快。这是现在的通用做法（GPT-2 把 q、k、v 合成一个 `c_attn`；LLaMA / Qwen 分成 `q_proj`、`k_proj`、`v_proj`；GQA、MQA、MLA 是在 k、v 的头数或维度上做变化）。
+8. **切头的形状**：`(B, S, d_model)` → `"... s (h d) -> ... h s d"` → `(B, h, S, d_k)`。head 维必须在 S 前面：SDPA 只在最后两维做点积和 softmax，前面都当 batch。如果停在 `(B, S, h, d_k)`，就成了同一个 token 的头和头之间互相做注意力；`(S, S)` 的 mask 通常广播不上而报错，S 恰好等于 h 时则不报错但悄悄算错。
+9. **RoPE 只转 q 和 k，不转 v**：q 和 k 的旋转在点积里相互抵消，只剩相对位置 i−j。v 不参与点积，转了 v 会把绝对位置直接混进输出内容。
+10. **RoPE 用 d_k，不用 d_model**：每个头内部两两配对旋转，所有头共用同一套角度。
+11. **head 维广播**：`token_positions` 是 `(B, S)` 时，先 `unsqueeze(-2)` 变成 `(B, 1, S)`，查表得到 `(B, 1, S, d_k/2)`，那个 1 广播到每个头。测试传的是 `(1, S)`，不补维也碰巧能过，但真实的 `(B, S)` 会让 B 去对 h。
+12. **`token_positions` 为什么要由外部传入**：位置不一定等于 token 在张量里的下标。例如 KV cache 推理时只送进 1 个新 token，它的位置是 10 而不是 0；还有左侧 padding、多文档拼接（packing）时每篇文档位置从 0 重新计数。
+13. **加功能不破坏旧接口**：新参数默认 `None`，旧的调用方式和测试都不受影响；改完要把旧测试一起跑一遍。
+
+#### 验收
+- `uv run pytest -k test_softmax_matches_pytorch`：PASSED。
+- `uv run pytest -k test_scaled_dot_product_attention`：3D、4D 都 PASSED。
+- `uv run pytest -k test_multihead_self_attention`：`test_multihead_self_attention` 和 `test_multihead_self_attention_with_rope` 都 PASSED。
+
+#### 回忆题
+1. **SDPA 里为什么写 `math.sqrt(Q.shape[-1])`，不能写 `torch.sqrt(Q.shape[-1])`？**
+   - 我的答案：shape 是维度大小，是一个整数值，不是 tensor。
+   - 订正：对 ✅。
+2. **如果某一行 mask 全是 False，softmax 之后是什么？**
+   - 我的答案：全 0。
+   - 订正：不对 ❌。整行都是 -inf，减最大值得到 -inf −（-inf）= NaN，结果是一整行 NaN。因果 mask 的对角线永远是 True，所以不会遇到这种情况。
+3. **切头后为什么必须是 `(..., h, S, d_k)`？**
+   - 我的答案：SDPA 只对最后两个维度做点积和 softmax，前面都看作 batch。
+   - 订正：对 ✅，但漏了后果：停在 `(..., S, h, d_k)` 会变成头和头之间做注意力，mask 一般会报错，S 等于 h 时会静默算错。
+4. **`LinearNoBias(...)(q_proj_weight)` 和 `mha.q_proj.weight.data = q_proj_weight` 有什么区别？**
+   - 我的答案：先对 q_proj 初始化，再把测试用的矩阵赋值进去。
+   - 订正：这只描述了 `.data` 的写法 ✅。前者是调用 forward，把权重当成输入去乘一个随机矩阵，根本没有加载进去。
+5. **为什么 v 不做 RoPE？**
+   - 我的答案：v 是得分矩阵，输出是每个位置在所有向量上的加权和。
+   - 订正：部分对 ⚠️。得分是 softmax(QKᵀ/√d_k)，v 是被加权的内容。不转 v，是因为它不参与点积，旋转没法抵消成相对位置。
+6. **KV cache 推理时第 11 个 token 进来，用默认 `token_positions` 会怎样？**
+   - 我的答案：会把 0 到 11 的自注意力重新算一遍，KV cache 变大。
+   - 订正：不对 ❌。只送进 1 个 token，S=1，默认位置是 `[0]`，它会被当成位置 0 旋转，和缓存里的 k 的相对距离全错，而且不报错。必须由调用方传入 `[[10]]`。
+
+#### 下一步
+- §3.5 Transformer block（pre-norm：`y = x + MHA(RMSNorm(x))`，再 `z = y + FFN(RMSNorm(y))`）。

@@ -290,3 +290,72 @@ In short: order is part of the tokenizer; dropping order is a different tokenize
 
 #### Next
 - §3.4.4 softmax (subtract the max for numerical stability), then scaled dot-product attention.
+## Day — softmax, scaled dot-product attention, and multi-head self-attention (2026-10-26)
+
+#### What I did
+- §3.4.4 softmax: `softmax(x, dim)` in `cs336_basics/nn_utils.py` plus `adapters.run_softmax`.
+- §3.4.4 scaled dot-product attention (SDPA): `nn_utils.scaled_dot_product_attention(Q, K, V, mask)` plus `adapters.run_scaled_dot_product_attention`.
+- §3.4.5 causal multi-head self-attention (MHA): `MultiHeadSelfAttention` in `cs336_basics/attention.py` plus `adapters.run_multihead_self_attention`.
+- MHA with RoPE: optional `theta` / `max_seq_len` constructor args, plus `adapters.run_multihead_self_attention_with_rope`.
+
+#### Common small mistakes
+1. **Forgot to wire the adapter again (4 times in this section)**: after every module, import it in `tests/adapters.py` and replace `raise NotImplementedError` with the implementation. Check this before saying "done", and delete any leftover `raise` after `return`.
+2. **Hardcoded `dim=-1` in softmax**: the function takes a `dim` argument, so use it.
+3. **Summed the wrong thing in softmax**: the denominator sums the exp values, not the raw x. `torch.exp` takes a single tensor, with no `dim` / `keepdim`.
+4. **`torch.max(..., dim)` returns (values, indices)**: take `.values` or use `amax`. `torch.sum` already returns a tensor, so there is no `.values` on it.
+5. **`torch.sqrt` on an int**: `Q.shape[-1]` is a Python int, not a tensor; use `math.sqrt`.
+6. **Dim size vs dim index**: softmax needs `dim=-1` (an index), not `K.shape[-1]` (a size).
+7. **`masked_fill` value set to `scores`**: fill with `float('-inf')`, and only when `mask is not None`.
+8. **Missing `self.` on submodules**: `q_proj = LinearNoBias(...)` is just a local variable; it is not registered as a submodule and forward can't see it.
+9. **`/` vs `//`**: `d_model / num_heads` gives a float; use `//`.
+10. **Commas in an einops pattern**: `"... h s d -> ... s (h d)"` has no commas; commas only separate inputs in einsum.
+11. **Missing `output_proj`**: after merging heads, multiply by W_O once more.
+12. **Wrong weight loading in the adapter (second time)**: `LinearNoBias(...)(q_proj_weight)` calls forward and multiplies the weight by a random matrix. The right way is `mha.q_proj.weight.data = q_proj_weight`.
+13. **RoPE overwritten unconditionally**: `self.rope = RoPE(...)` followed directly by `self.rope = None`; it needs if/else.
+14. **Precedence of `theta and max_seq_len is not None`**: it means `theta and (max_seq_len is not None)`; write `is not None` on both sides.
+15. **RoPE applied before splitting heads**: the last dim is then d_model, but the RoPE table is built for d_k. Split first, then rotate.
+16. **Default positions used `x.shape[-1]`**: that is d_model; the sequence length is `x.shape[-2]`. The tensor also belongs on `x.device`; there is no variable called `device` inside `forward`.
+17. **Didn't keep the result of `unsqueeze`**: it is not in place; write `token_positions = token_positions.unsqueeze(-2)`.
+
+#### Noteworthy points
+1. **Subtract the max in softmax**: e^x overflows above about x = 88 in float32. Subtracting the same constant from every element doesn't change the result, so subtract the max; `keepdim=True` keeps it broadcastable.
+2. **Attention softmax runs over the key dim (last dim)**: each query's weights over all keys sum to 1.
+3. **Why divide by √d_k**: if q and k components have variance 1, q·k has variance d_k. Large scores saturate softmax toward one-hot, so gradients go to about 0. Dividing by √d_k brings the variance back to 1.
+4. **Mask convention**: True means attend, False means blocked. `masked_fill(~mask, -inf)` makes those positions 0 after softmax. A row that is entirely False becomes all -inf, which gives NaN.
+5. **Causal mask**: `torch.tril(torch.ones(S, S, dtype=torch.bool, device=x.device))`; the lower triangle is True, so token i sees only 0..i.
+6. **Transpose in einsum without `.T`**: name the dims, `"... m d, ... n d -> ... m n"` is QKᵀ. With `@`, use `transpose(-2, -1)`; `.T` would also reverse batch dims.
+7. **Project once, then split into heads**: one `(d_model, d_model)` matrix is mathematically the same as stacking each head's small matrix, but needs only one matmul. This is the standard approach (GPT-2 fuses q, k, v into one `c_attn`; LLaMA / Qwen use separate `q_proj`, `k_proj`, `v_proj`; GQA, MQA, and MLA vary the number or size of k and v heads).
+8. **Head-split shapes**: `(B, S, d_model)` → `"... s (h d) -> ... h s d"` → `(B, h, S, d_k)`. The head dim must come before S: SDPA does the dot product and softmax over the last two dims and treats everything before as batch. Stopping at `(B, S, h, d_k)` makes heads of the same token attend to each other; the `(S, S)` mask usually fails to broadcast and errors, but if S happens to equal h it silently computes the wrong thing.
+9. **RoPE rotates only q and k, not v**: the rotations of q and k cancel inside the dot product, leaving only the relative position i−j. v is not in the dot product, so rotating it would mix absolute positions straight into the output content.
+10. **RoPE uses d_k, not d_model**: pairs rotate within each head, and all heads share the same angles.
+11. **Head-dim broadcasting**: for `(B, S)` positions, `unsqueeze(-2)` gives `(B, 1, S)`, the lookup gives `(B, 1, S, d_k/2)`, and the 1 broadcasts over heads. The test passes `(1, S)`, which happens to work without the extra dim, but a real `(B, S)` would line B up against h.
+12. **Why `token_positions` comes from the caller**: a position is not always the token's index in the tensor. With a KV cache only 1 new token is fed in, and its position is 10, not 0; left padding and packing several documents into one sequence (each restarting at 0) are other cases.
+13. **Add features without breaking the old interface**: new args default to `None`, so old calls and tests are unaffected; rerun the old test after the change.
+
+#### Verification
+- `uv run pytest -k test_softmax_matches_pytorch`: PASSED.
+- `uv run pytest -k test_scaled_dot_product_attention`: 3D and 4D both PASSED.
+- `uv run pytest -k test_multihead_self_attention`: `test_multihead_self_attention` and `test_multihead_self_attention_with_rope` both PASSED.
+
+#### Recall questions
+1. **Why `math.sqrt(Q.shape[-1])` and not `torch.sqrt(Q.shape[-1])` in SDPA?**
+   - My answer: a shape entry is a dim size, an integer, not a tensor.
+   - Correction: right ✅.
+2. **If a mask row is all False, what does softmax give?**
+   - My answer: all zeros.
+   - Correction: wrong ❌. The whole row is -inf; subtracting the max gives -inf − (−inf) = NaN, so the row is all NaN. The causal mask's diagonal is always True, so this doesn't happen there.
+3. **Why must the head split be `(..., h, S, d_k)`?**
+   - My answer: SDPA only does the dot product and softmax on the last two dims and treats the rest as batch.
+   - Correction: right ✅, but I missed the consequence: `(..., S, h, d_k)` makes heads attend to each other; the mask usually errors, and when S equals h it is silently wrong.
+4. **What is the difference between `LinearNoBias(...)(q_proj_weight)` and `mha.q_proj.weight.data = q_proj_weight`?**
+   - My answer: initialize q_proj first, then assign the test matrix into it.
+   - Correction: that only describes the `.data` version ✅. The first one calls forward, multiplying the weight by a random matrix, so nothing is loaded.
+5. **Why isn't RoPE applied to v?**
+   - My answer: v is the score matrix; the output is each position's weighted sum over all vectors.
+   - Correction: partly right ⚠️. The scores are softmax(QKᵀ/√d_k); v is the content being weighted. v isn't rotated because it doesn't enter the dot product, so its rotation can't cancel into a relative position.
+6. **With a KV cache, what happens to the 11th token if `token_positions` uses the default?**
+   - My answer: it recomputes self-attention over tokens 0 to 11 and grows the KV cache.
+   - Correction: wrong ❌. Only 1 token is fed in, so S=1 and the default is `[0]`. It gets rotated as position 0, its relative distances to the cached keys are all wrong, and nothing errors. The caller must pass `[[10]]`.
+
+#### Next
+- §3.5 Transformer block (pre-norm: `y = x + MHA(RMSNorm(x))`, then `z = y + FFN(RMSNorm(y))`).

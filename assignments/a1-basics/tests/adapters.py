@@ -16,6 +16,8 @@ from cs336_basics.embedding import EmbeddingLayer
 from cs336_basics.rmsnorm import RMSNorm
 from cs336_basics.swiglu import SwiGlu,silu
 from cs336_basics.rope import RoPE
+from cs336_basics.nn_utils import softmax,scaled_dot_product_attention
+from cs336_basics.attention import MultiHeadSelfAttention
 def run_linear(
     d_in: int,
     d_out: int,
@@ -121,6 +123,7 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
+    return scaled_dot_product_attention(Q=Q, K=K, V=V,mask=mask)
     raise NotImplementedError
 
 
@@ -155,6 +158,13 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
+    multiheadselfattention = MultiHeadSelfAttention(d_model=d_model,num_heads=num_heads)
+    multiheadselfattention.q_proj.weight.data = q_proj_weight
+    multiheadselfattention.k_proj.weight.data = k_proj_weight
+    multiheadselfattention.v_proj.weight.data = v_proj_weight
+    multiheadselfattention.output_proj.weight.data = o_proj_weight
+
+    return multiheadselfattention(in_features)
     raise NotImplementedError
 
 
@@ -195,6 +205,14 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
+    multiheadselfattention = MultiHeadSelfAttention(d_model=d_model,num_heads=num_heads,theta=theta,max_seq_len=max_seq_len)
+    multiheadselfattention.q_proj.weight.data = q_proj_weight
+    multiheadselfattention.k_proj.weight.data = k_proj_weight
+    multiheadselfattention.v_proj.weight.data = v_proj_weight
+    multiheadselfattention.output_proj.weight.data = o_proj_weight
+    
+
+    return multiheadselfattention(in_features,token_positions)
     raise NotImplementedError
 
 
@@ -452,6 +470,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
+    
+    return softmax(in_features,dim=dim)
     raise NotImplementedError
 
 
