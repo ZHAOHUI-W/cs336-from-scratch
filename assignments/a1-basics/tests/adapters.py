@@ -18,6 +18,8 @@ from cs336_basics.swiglu import SwiGlu,silu
 from cs336_basics.rope import RoPE
 from cs336_basics.nn_utils import softmax,scaled_dot_product_attention
 from cs336_basics.attention import MultiHeadSelfAttention
+from cs336_basics.transformer import TransformerBlock
+from cs336_basics.transformer_lm import TransformerLM
 def run_linear(
     d_in: int,
     d_out: int,
@@ -310,6 +312,10 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
+    transformer_block = TransformerBlock(d_model=d_model,num_heads=num_heads,d_ff=d_ff,max_seq_len=max_seq_len,theta=theta)
+    transformer_block.load_state_dict(weights)
+
+    return transformer_block(in_features)
     raise NotImplementedError
 
 
@@ -390,6 +396,9 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
+    transformer_lm = TransformerLM(vocab_size=vocab_size,context_length=context_length,d_model=d_model,num_layers=num_layers,num_heads=num_heads,d_ff=d_ff,rope_theta=rope_theta)
+    transformer_lm.load_state_dict(weights)
+    return transformer_lm(in_indices)
     raise NotImplementedError
 
 

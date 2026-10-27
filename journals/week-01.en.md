@@ -359,3 +359,63 @@ In short: order is part of the tokenizer; dropping order is a different tokenize
 
 #### Next
 - §3.5 Transformer block (pre-norm: `y = x + MHA(RMSNorm(x))`, then `z = y + FFN(RMSNorm(y))`).
+
+## Day — Transformer block and TransformerLM (2026-10-26 ~ 2026-10-27)
+
+#### What I did
+- §3.5 Transformer block: pre-norm `TransformerBlock` in `cs336_basics/transformer.py` plus `adapters.run_transformer_block`.
+- §3.5 TransformerLM: `TransformerLM` in `cs336_basics/transformer_lm.py` plus `adapters.run_transformer_lm`.
+
+#### Common small mistakes
+1. **Adapter didn't load the weights (third time)**: the block adapter only had a comment, so the test ran on a randomly initialized model. Once submodules are named after the keys, a single `load_state_dict(weights)` loads everything.
+2. **Class named lowercase `transformer`**: the adapter imports `TransformerBlock`, so the class name must match (and classes use CamelCase by convention).
+3. **Only one block in the `ModuleList`**: `num_layers` was passed in but never used. Write `[TransformerBlock(...) for _ in range(num_layers)]`. The error was `Unexpected key(s): layers.1.*, layers.2.*`.
+4. **`forward` skipped the blocks entirely**: the embedding output went straight into `ln_final`, i.e. a 0-layer model. This only showed up once all keys matched, as an output mismatch against the snapshot.
+5. **The loop must write back to `x`**: `for block in self.layers: x = block(x)`, so each layer gets the previous layer's output.
+6. **Forgot to pass `device` when building blocks**: CPU tests still pass; it breaks on GPU.
+7. **Argument name mapping**: the LM signature's `context_length` and `rope_theta` map to the block's `max_seq_len` and `theta`.
+8. **Dead `raise NotImplementedError` after `return` again**: delete it.
+
+#### Noteworthy points
+1. **Pre-norm layout**: `y = x + attn(ln1(x), pos)`, `z = y + ffn(ln2(y))`. Only sublayer inputs are normalized; the residual trunk is not.
+2. **Two separate RMSNorms**: each has its own learnable gain and serves a different sublayer (attention vs FFN), so they can't be shared.
+3. **What the residual does**: output = x + f(x), derivative = 1 + f'(x), so the gradient always has an identity path and doesn't vanish easily even in deep stacks.
+4. **Pre-norm vs post-norm**: post-norm (original Transformer) puts the norm after the residual add, so the trunk is normalized every layer; deep models train less stably and usually need warmup. Pre-norm keeps the trunk clean and trains more stably, at the cost of an extra `ln_final`.
+5. **A block keeps the shape**: input and output are both (B, S, d_model), which is why blocks stack.
+6. **LM data flow**: `(B, S)` ints → embedding `(B, S, d_model)` → N blocks → `ln_final` → `lm_head` `(B, S, vocab_size)`.
+7. **What `lm_head` is**: a `LinearNoBias(d_model, vocab_size)` with weight shape (vocab_size, d_model), trainable and randomly initialized. It dots each position's hidden vector h with each word's row to score that word.
+8. **Output is logits, no softmax**: logits are unnormalized scores; they can be negative and don't sum to 1. Softmax lives outside the model: inside cross-entropy during training, before sampling during generation.
+9. **Logits at position t predict token t+1**: the causal mask lets position t see only 0..t, so its job is to guess the next token.
+10. **Weight tying**: GPT-2 shares one matrix between `lm_head` and the embedding (same shape). A1 uses two independent weights.
+11. **`nn.ModuleList` vs a Python list**: ModuleList registers block i as a submodule named `i`, producing keys like `layers.0.attn.q_proj.weight`. Modules in a plain list are not registered: `load_state_dict` reports Unexpected keys, `parameters()` doesn't see them (the optimizer won't update them), and `.to(device)` won't move them.
+12. **Missing vs Unexpected**: Missing means the model needs a key the dict lacks (e.g. 5 layers built, 3 in the weights); Unexpected means the dict has a key the model lacks (e.g. 1 layer built, 3 in the weights).
+13. **Why the truncated-input test passes**: with the sequence halved, the first half of the output is identical to the full-input run. Three reasons: the causal mask hides later tokens; RoPE's default positions `arange(S)` share the same prefix; RMSNorm and FFN are per-token.
+
+#### Verification
+- `uv run pytest -k "test_transformer_lm or test_transformer_block"`: `test_transformer_block`, `test_transformer_lm`, and `test_transformer_lm_truncated_input` all PASSED.
+
+#### Recall questions
+1. **Why two RMSNorms in a block?**
+   - My answer: the two inputs being normalized have different means, so they need to be trained separately.
+   - Correction: right direction ⚠️. RMSNorm doesn't subtract the mean; more precisely, each norm has its own gain serving a different sublayer.
+2. **What does the residual connection do?**
+   - My answer: stabilizes backpropagation.
+   - Correction: right ✅. Specifically, the derivative is 1 + f', so the gradient always has an identity path.
+3. **Pre-norm vs post-norm?**
+   - My answer: forgot.
+   - Correction: see noteworthy point 4.
+4. **Block input/output shape?**
+   - My answer: both (B, S, d_model); the dimension doesn't change.
+   - Correction: right ✅, which is what makes stacking possible.
+5. **What happens if `self.layers` is a plain list?**
+   - My answer: ModuleList registers block i as submodule i so keys like `layers.0.attn...` are recognized; PyTorch doesn't see modules in a plain list, so state_dict can't see them and loading fails.
+   - Correction: right ✅. Also: the error is Unexpected key, and the optimizer and `.to(device)` don't see those blocks either.
+6. **Why is the first half identical with truncated input?**
+   - My answer: the causal mask means each token only sees earlier tokens, so feeding half doesn't matter; not sure about RoPE.
+   - Correction: partly right ⚠️. RoPE only depends on each token's own position, and `arange(6)` is exactly the first 6 of `arange(12)`, so the rotations match.
+7. **Model built with 5 layers but weights have 3: what error?**
+   - My answer: missing input?
+   - Correction: mostly right ⚠️. Precisely: `Missing key(s): layers.3.*, layers.4.*`.
+
+#### Next
+- §4 cross-entropy, then AdamW, cosine learning-rate schedule, and gradient clipping.

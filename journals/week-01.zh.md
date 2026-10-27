@@ -327,3 +327,63 @@
 
 #### 下一步
 - §3.5 Transformer block（pre-norm：`y = x + MHA(RMSNorm(x))`，再 `z = y + FFN(RMSNorm(y))`）。
+
+## Day — Transformer block 与 TransformerLM（2026-10-26 ~ 2026-10-27）
+
+#### 做了什么
+- §3.5 Transformer block：`cs336_basics/transformer.py` 的 `TransformerBlock`（pre-norm），以及 `adapters.run_transformer_block`。
+- §3.5 TransformerLM：`cs336_basics/transformer_lm.py` 的 `TransformerLM`，以及 `adapters.run_transformer_lm`。
+
+#### 常犯的小错误
+1. **adapter 没有加载权重（第三次了）**：block 的 adapter 里只留了一句注释，测试跑的是随机初始化的模型。子模块按 key 命名后，一句 `load_state_dict(weights)` 就能全部加载。
+2. **类名写成小写 `transformer`**：adapter 里 import 的是 `TransformerBlock`，类名要和 import 对上（类名也按惯例用大驼峰）。
+3. **`ModuleList` 里只放了一个 block**：`num_layers` 传进来却没用到，要写 `[TransformerBlock(...) for _ in range(num_layers)]`。报错是 `Unexpected key(s): layers.1.*, layers.2.*`。
+4. **`forward` 完全跳过了 block**：embedding 出来直接进 `ln_final`，等于 0 层模型。key 全部对上之后才暴露出来，表现为输出和 snapshot 对不上。
+5. **循环要把结果写回 `x`**：`for block in self.layers: x = block(x)`，下一层才能拿到上一层的输出。
+6. **建 block 时漏传 `device`**：CPU 测试照样能过，上 GPU 才会出问题。
+7. **参数名转换**：LM 签名里的 `context_length` 和 `rope_theta`，传给 block 时分别对应 `max_seq_len` 和 `theta`。
+8. **`return` 后面又留了 `raise NotImplementedError`**：是死代码，删掉。
+
+#### 值得注意的地方
+1. **pre-norm 结构**：`y = x + attn(ln1(x), pos)`，`z = y + ffn(ln2(y))`。只对子层的输入做 norm，残差主干上不做 norm。
+2. **两个 RMSNorm 要分开**：每个都有自己可学习的 gain，分别服务 attention 和 FFN 两个不同的子层，不能共用。
+3. **残差的作用**：输出等于 x + f(x)，求导得到 1 + f'(x)，梯度始终有一条恒等通路，层数再深也不容易消失。
+4. **pre-norm 与 post-norm**：post-norm（原始 Transformer）把 norm 放在残差相加之后，主干每层都被 norm 一次，深层训练不稳定，通常需要 warmup。pre-norm 主干是干净的，训练更稳定，代价是最后要多加一个 `ln_final`。
+5. **block 不改变形状**：输入输出都是 (B, S, d_model)，所以可以一层接一层地堆叠。
+6. **LM 的数据流**：`(B, S)` 整数 → embedding 得到 `(B, S, d_model)` → N 个 block → `ln_final` → `lm_head` 得到 `(B, S, vocab_size)`。
+7. **`lm_head` 是什么**：一个 `LinearNoBias(d_model, vocab_size)`，权重形状是 (vocab_size, d_model)，可训练、随机初始化。它把每个位置的隐藏向量 h 和每个词的那一行做点积，得到这个词的打分。
+8. **输出是 logits，不做 softmax**：logits 是未归一化的分数，可以是负数，加起来也不等于 1。softmax 放在模型外面：训练时在交叉熵里做，生成时在采样前做。
+9. **位置 t 的 logits 预测的是第 t+1 个 token**：因果 mask 让位置 t 只看得到 0..t，所以它的任务是猜下一个。
+10. **weight tying**：GPT-2 让 `lm_head` 和 embedding 共用同一个矩阵（形状正好相同）。A1 用的是两份独立的权重。
+11. **`nn.ModuleList` 和 Python list 的区别**：ModuleList 会把第 i 个 block 注册成名为 `i` 的子模块，生成 `layers.0.attn.q_proj.weight` 这样的 key。普通 list 里的模块不会被注册：`load_state_dict` 报 Unexpected key，`parameters()` 看不到它们（优化器不会更新），`.to(device)` 也不会搬它们。
+12. **Missing 与 Unexpected**：Missing 是模型需要、字典里没有（比如建了 5 层、权重只有 3 层）；Unexpected 是字典里有、模型没有（比如建了 1 层、权重有 3 层）。
+13. **截断输入测试为什么能过**：序列减半后，前半段输出和完整输入时完全一样。原因有三：因果 mask 下每个位置看不到后面的 token；RoPE 的默认位置 `arange(S)` 前缀相同；RMSNorm 和 FFN 都是逐 token 计算。
+
+#### 验收
+- `uv run pytest -k "test_transformer_lm or test_transformer_block"`：`test_transformer_block`、`test_transformer_lm`、`test_transformer_lm_truncated_input` 全部 PASSED。
+
+#### 回忆题
+1. **block 里为什么要两个 RMSNorm？**
+   - 我的答案：这两个要 norm 的矩阵均值不一样，需要分别训练。
+   - 订正：方向对 ⚠️。RMSNorm 不减均值；准确地说，每个 norm 有自己的 gain，分别服务 attention 和 FFN 两个不同的子层。
+2. **残差连接的作用？**
+   - 我的答案：为了反向传播的稳定性。
+   - 订正：对 ✅。具体是导数 1 + f'，梯度始终有一条恒等通路。
+3. **pre-norm 和 post-norm 的区别？**
+   - 我的答案：忘记了。
+   - 订正：见上面第 4 条。
+4. **block 的输入输出形状？**
+   - 我的答案：都是 (B, S, d_model)，不改变维度。
+   - 订正：对 ✅，所以才能堆叠。
+5. **`self.layers` 用普通 list 会怎样？**
+   - 我的答案：ModuleList 会把第 i 个 block 登记成名为 i 的子模块，key 能被识别为 `layers.0.attn...`；普通 list PyTorch 不认识，state_dict 看不到，load 不进去。
+   - 订正：对 ✅。补充：报的是 Unexpected key，而且优化器和 `.to(device)` 也看不到这些 block。
+6. **为什么截断输入后前半段输出完全一样？**
+   - 我的答案：因果 mask 让当前 token 只能看到它之前的 token，所以只输入一半也不影响；RoPE 这块不太清楚。
+   - 订正：部分对 ⚠️。RoPE 只看每个 token 自己的位置编号，`arange(6)` 正好是 `arange(12)` 的前 6 个，旋转结果相同。
+7. **模型建了 5 层、权重只有 3 层，会报什么？**
+   - 我的答案：会报缺少输入？
+   - 订正：基本对 ⚠️。准确说法是 `Missing key(s): layers.3.*, layers.4.*`。
+
+#### 下一步
+- §4 交叉熵（cross-entropy），然后是 AdamW、学习率余弦调度、梯度裁剪。
