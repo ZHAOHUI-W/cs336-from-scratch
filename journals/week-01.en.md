@@ -419,3 +419,68 @@ In short: order is part of the tokenizer; dropping order is a different tokenize
 
 #### Next
 - §4 cross-entropy, then AdamW, cosine learning-rate schedule, and gradient clipping.
+## Day — Resource accounting: transformer_accounting (2026-10-27)
+
+#### Common mistakes
+1. **Counting the embedding inside the block**: the embedding (V·d) sits outside all blocks, so there is only one copy and it must not be multiplied by L.
+2. **Writing output_proj as (d_k, d)**: after the heads are concatenated the width is d, so output_proj is (d, d).
+3. **Forgetting the FFN shapes**: SwiGLU has three matrices. w1 and w3 are (d_ff, d) and w2 is (d, d_ff), so each block has 3·d·d_ff parameters.
+4. **Missing ln1 and ln2 inside the block**: each block has two RMSNorms, which is 2d parameters.
+5. **Multiplying 2Vd by L**: the embedding and lm_head exist once. Multiplying them by L gave 9.2B instead of the correct ~1.64B.
+6. **Mixing up GB and GiB**: bytes ÷ 10⁹ is GB, and bytes ÷ 2³⁰ is GiB. The earlier 34.28 was really GiB.
+7. **Reversing the matmul shape order**: with batch=1 the input is (S×d), so a projection is (S×d)·(d×d). Writing (d×d)·(S×d) gives shapes that don't line up.
+8. **Not splitting QKᵀ and scores×V by head**: each head is (S×d_k)·(d_k×S), and there are h of them.
+9. **Missing the output_proj and FFN matmuls**: the FFN turns out to be the largest part.
+10. **Counting RoPE, RMSNorm, and softmax as matmuls**: they are elementwise or row-wise ops of order S·d or h·S². The embedding lookup is not a matmul either.
+11. **Multiplying all four dimensions together**: (S×d)·(d×d) was written as S·d³. The shared inner dimension n counts only once, so it is 2·S·d·d = 2Sd².
+12. **Dropping the 2 in 2mnp**: the multiply and the add each count as one FLOP.
+13. **Thinking the FFN-to-projection ratio is f/d ≈ 2.68**: the coefficient matters, so 6Sdf / 8Sd² = (3/4)·(f/d) ≈ 2.
+14. **Predicting that all four shares shrink as the model grows**: the shares always sum to 100%, so they cannot all shrink.
+
+#### Noteworthy points
+1. **The 2mnp rule**: (m×n)·(n×p) produces m·p entries. Each entry is a length-n dot product with n multiplies and n adds, so the total is 2mnp.
+2. **Parameter count**: P = L(4d² + 3df + 2d) + 2Vd + d. GPT-2 XL has 1,640,452,800 ≈ 1.64B parameters, which is 6.56 GB (6.11 GiB) in fp32. Blocks are about 90% of it, and the FFN is about 2× the attention projections.
+3. **Per-block matmul list (batch=1)**:
+
+   | Matmul | Shape | Count |
+   |---|---|---|
+   | Q, K, V projections | (S×d)·(d×d) | 3 |
+   | QKᵀ | (S×d_k)·(d_k×S) | h |
+   | scores × V | (S×S)·(S×d_k) | h |
+   | output_proj | (S×d)·(d×d) | 1 |
+   | FFN w1, w3 | (S×d)·(d×f) | 2 |
+   | FFN w2 | (S×f)·(f×d) | 1 |
+
+   Outside the blocks there is only lm_head: (S×d)·(d×V).
+4. **Forward FLOPs formula**: FLOPs = L(8Sd² + 4S²d + 6Sdf) + 2SdV. Using h·d_k = d merges the per-head terms.
+5. **A simplification trick**: dividing all three block terms by 2Sd gives 3f : 4d : 2S, which shows at a glance which term is largest.
+6. **GPT-2 XL (S=1024)**: 6.98×10¹⁰ per block, 3.35×10¹² for 48 layers, 1.65×10¹¹ for lm_head, and 3.52×10¹² in total. FFN is 57.5%, projections 28.6%, attention scores 9.2%, and lm_head 4.7%.
+7. **How d_ff is chosen**: the multiple of 64 nearest to 8/3·d. That is 2048 for small, 2752 for medium, 3392 for large, and 4288 for XL.
+8. **Trends as the model grows**:
+
+   | Model | Total FLOPs | FFN | Projections | Attention scores | lm_head |
+   |---|---|---|---|---|---|
+   | small | 2.9×10¹¹ | 39.8% | 19.9% | 13.3% | 27.1% |
+   | medium | 8.3×10¹¹ | 50.1% | 24.8% | 12.4% | 12.7% |
+   | large | 1.8×10¹² | 54.3% | 27.3% | 10.9% | 7.4% |
+   | XL | 3.5×10¹² | 57.5% | 28.6% | 9.2% | 4.7% |
+
+   The FFN and projections scale with d², so their shares rise, and they stay at about 2:1. Attention scores scale with S²d, and lm_head scales with dV and exists once (its ratio to the blocks is about V/(L·d)), so both shares fall. The vocabulary is expensive for small models: lm_head is 27% of GPT-2 small.
+9. **Long context**: raising XL's context from 1024 to 16384 (16×) makes attention scores 256× larger while every other term grows 16×. Total FLOPs grow about 38×, to 1.34×10¹⁴, and the attention-score share jumps from 9.2% to 61.7%. This is why long context is expensive, and it is what FlashAttention and sparse attention target.
+
+#### Recall questions
+1. **How many FLOPs does (m×n)·(n×p) take, and why?**
+   - Answer: 2mnp. The result has mp entries, each a length-n dot product (n multiplies and n adds).
+2. **What are GPT-2 XL's parameter count and fp32 memory?**
+   - Answer: about 1.64B parameters, which is 6.56 GB.
+3. **Why aren't RMSNorm and softmax counted in the FLOPs?**
+   - Answer: they are not matmuls, and at order S·d or h·S² they are one or two orders of magnitude smaller.
+4. **Does the FFN-to-projection ratio change as the model grows?**
+   - My answer: it gets smaller.
+   - Correction: it doesn't change ⚠️. Plugging f ≈ (8/3)d into 3f/(4d) cancels d and leaves about 2.
+5. **When the context grows 16×, how do the terms and the total change?**
+   - My answer: FFN, projections, and lm_head each grow 16×, attention scores grow 256×, the total grows more than 16×, and attention becomes the largest share.
+   - Correction: correct ✅. The total grows about 38×.
+
+#### Next step
+- §4.1 cross-entropy: the concept questions are answered, so next is implementing `run_cross_entropy`.
