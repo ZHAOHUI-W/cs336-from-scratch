@@ -581,3 +581,51 @@ In short: order is part of the tokenizer; dropping order is a different tokenize
 
 #### Next step
 - adamw_accounting: memory for AdamW training (parameters, gradients, optimizer state, activations) and FLOPs.
+### adamw_accounting (2026-10-30)
+
+#### Common mistakes
+1. **Forgot gradients as one of the four categories**: memory holds parameters, gradients, optimizer state, and activations. Gradients are also P numbers, because every parameter has a same-shaped `p.grad`.
+2. **Called activations "the input text"**: token ids are tiny. What takes memory is the forward intermediates, which backward needs.
+3. **GB conversion**: 16P = 26.24 billion bytes = 26.24 GB, not 244 GB. Dividing by 10⁹ gives GB; dividing by 2³⁰ gives GiB (about 24.4).
+4. **Put ln_final and lm_head inside the block**: they appear once, after all L blocks. The two residual adds were also missing.
+5. **Treated B as GB**: B is a sample count and must be an integer, so 80 GB allows at most B=3.
+6. **TFLOP/s conversion**: 495 TFLOP/s = 4.95e14, not 495e13. T is 10¹².
+7. **No parentheses around the denominator**: `/50%*495e13` divides by 50% and then multiplies. It should be `/(0.5×4.95e14)`.
+
+#### Noteworthy
+1. **The four memory categories**:
+   - Parameters: P
+   - Gradients: P
+   - AdamW state (m, v): 2P
+   - The first three total 4P float32 values, or 16P bytes. For GPT-2 XL that is 26.24 GB, more than a 24 GB card holds on its own.
+2. **Activation formula**: elements = L(8BSd + 3BSf + 2BhS²) + BSd + 2BSV. Multiply by 4 for bytes.
+3. **GPT-2 XL memory ≈ 15.53·B + 26.24 GB**: 80 GB fits at most B=3 (72.8 GB). B=4 needs 88.4 GB, which is too much.
+4. **Where activations go at S=1024**:
+   - 2BhS² (QKᵀ and softmax): about 65%
+   - 3BSf: about 16%
+   - 8BSd: about 16%
+   - Outside the blocks: about 3%
+   - The (B,h,S,S) matrices dominate, which is why FlashAttention doesn't store them and recomputes them blockwise in backward.
+5. **AdamW is about 14 FLOPs per parameter, 14P per step**: that is negligible next to forward plus backward at 6P·BS (about 6144P at B=1). α_t is a scalar computed once per step, not multiplied by P.
+6. **Backward ≈ 2× forward**: the backward of Y=XW computes dX = dY·Wᵀ and dW = Xᵀ·dY, two matmuls of the same size. So training costs about 6 FLOPs per parameter per token. dW needs the forward input X, which is why activations must be stored.
+7. **Training time**: GPT-2 XL, 400K steps, B=1024, S=1024, one H100 in fp32 (495 TFLOP/s), 50% MFU.
+   - Total FLOPs = 3.52e12 × 3 × 1024 × 4e5 ≈ 4.33e21
+   - ÷ 2.475e14 ≈ 1.75e7 s ≈ **202 days**
+   - Hence multi-GPU parallelism and bf16 in real training.
+
+#### Recall questions
+1. **What four kinds of things does AdamW training keep in memory?**
+   - My answer: inputs, parameters, optimizer state.
+   - Correction: gradients were missing ⚠️, and "inputs" should be activations.
+2. **How many GB is 16P bytes for GPT-2 XL?**
+   - My answer: 244 GB.
+   - Correction: 26.24 GB ⚠️.
+3. **Which activation scales with S²?**
+   - Answer: QKᵀ and softmax, with shape (B,h,S,S) ✅.
+4. **Why is backward about 2× forward?**
+   - Answer: it needs two matmuls, one for dX and one for dW.
+5. **How long does GPT-2 XL take on one H100?**
+   - Answer: about 202 days.
+
+#### Next step
+- §4.4 cosine learning-rate schedule, starting from why warmup is needed.
