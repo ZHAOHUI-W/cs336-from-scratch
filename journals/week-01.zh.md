@@ -452,3 +452,100 @@
 
 #### 下一步
 - §4.1 交叉熵（cross-entropy）：已经答完概念题，接下来实现 `run_cross_entropy`。
+
+## Day — 训练基础：交叉熵、SGD、AdamW（2026-10-28 ~ 10-30）
+
+### 交叉熵（cross-entropy）
+
+#### 常见错误
+1. **普通函数里多写了 `self` 参数**：`cross_entropy` 不是类方法，不需要 `self`。
+2. **logsumexp 漏了 sum**：应该是 log(Σ exp(x − m))，先求和再取 log。
+3. **m 没有 squeeze**：`max(..., keepdim=True)` 得到 (N,1)，再和 (N,) 相加会广播成 (N,N)。
+4. **`inputs.shape(-2)` 把 shape 当函数调用**：shape 要用下标 `shape[-2]`。
+5. **reshape 结果没赋值回去**：`inputs.reshape(...)` 不是原地操作，不赋值等于没写。
+6. **`reshape(-1,)` 把 logits 压成了一维**：应该是 `reshape(-1, inputs.shape[-1])`，保留词表维 V。
+7. **adapter 没接**，`return` 后面又留了一个死掉的 `raise NotImplementedError`。
+
+#### 值得注意
+1. **单个位置的 loss = −x[y] + logsumexp(x)**：target 是 one-hot，交叉熵求和后只剩 −log p_y。
+2. **数值稳定的两个技巧**：减去最大值 m 防止 exp **上溢**；直接用 logsumexp，让 log 和 exp 相互抵消，防止 softmax 结果下溢成 0 后出现 log 0。先算稳定的 softmax 再取 log 的写法，在 logits 放大 1000 倍时仍然会失败。
+3. **取正确词的 logit**：`inputs[torch.arange(N), targets]`，第 i 行取第 targets[i] 列。
+4. **平均是对全部 B×S 个位置取的**：先把 logits 展平成 (−1, V)，targets 展平成 (−1)。
+5. **困惑度 = exp(平均交叉熵)**：先平均再取 exp，不能先 exp 再平均。可以理解为模型平均在几个词里犹豫。
+6. **初始 loss 自检**：均匀瞎猜时 loss = log V，困惑度 = V。V=50257 时约 10.8，V=10000 时约 9.2。训练一开始的 loss 如果明显偏离这个值，多半是初始化或 loss 写错了。
+
+### SGD 与 learning_rate_tuning
+
+#### 常见错误
+1. **`super().__init__(self, defaults)`**：第一个参数应该是 `params`，不是 `self`。
+2. **实验循环里没有 `backward()` 和 `step()`**：只算了 loss，参数从来没更新。
+3. **lr 写死成 1**：循环变量 `lr_rate` 没有传进优化器。
+4. **换 lr 时没有重建 weights 和优化器**：后一组会接着前一组的结果跑，没法对比。
+5. **f-string 语法错误**：`f"lr={lr_rate}: "loss...` 中间少了 `{}` 或逗号。
+6. **类型注解用了小写 `callable`**：应该用 `Callable`。
+
+#### 值得注意
+1. **∇ 是梯度**：loss 对每个参数元素分别求偏导，和参数同形状（`p.grad` 和 `p` 形状一样）。
+2. **三个东西各管一样**：`param_groups` 管超参数，`p.grad` 管梯度，`state[p]` 管跨步骤的历史。
+3. **param_groups 是列表套字典**：可以给不同参数分组设不同 lr 或 weight_decay，没写的超参数由 `defaults` 补上。
+4. **`p.data -= ...` 是原地更新**：`p = p - ...` 只是让局部变量指向新张量，模型参数不会变。
+5. **closure 和 `return loss`**：只为 L-BFGS 这类一步要多次算 loss 的优化器准备，SGD 和 AdamW 用不到，返回 None。
+6. **`backward()` 是累加梯度**：所以每步之前要先 `zero_grad()`。
+7. **lr 实验**：每步系数是 1 − 2lr/(100√(t+1))，loss 乘它的平方。
+   - lr=10：稳定但慢，10 步从 22 降到 3。
+   - lr=100：第 0 步系数正好是 −1，loss 不变，之后迅速收敛到约 1e-23。
+   - lr=1000：第 0 步系数是 −19，loss 乘 361，指数式发散到约 1e18。
+   - 结论：系数绝对值大于 1 就会发散。
+
+### AdamW
+
+#### 常见错误
+1. **adapter 第 7 次忘了接**：改完 `adamw.py` 还是 `raise NotImplementedError`。
+2. **adapter 返回了实例 `AdamW()`**：应该返回类本身 `AdamW`，测试会自己用参数和超参数去构造。
+3. **把 m、v 写成 `self.m = nn.Parameter(torch.zeros(params))`**：
+   - 每个参数需要各自的 m、v，一个 `self.m` 放不下。
+   - `params` 是张量序列，不是形状；而且生成器会被这里读空。
+   - m、v 是优化器状态，不是可训练参数。
+   - 正确位置是 `self.state[p]`。
+4. **m、v 用前没初始化，算完也没存回**：第一次用到时会报未定义。
+5. **`torch.zeros(p)`**：zeros 要的是形状，应该用 `torch.zeros_like(p)`，顺便带上 dtype 和 device。
+6. **`math.sqrt(v)`**：v 是张量，要用 `torch.sqrt`。
+7. **t 加了两次**：开头已经 `+1`，结尾又存了 `t+1`。
+8. **defaults 写死成常数**：传进来的 betas、eps、weight_decay 被忽略了。
+9. **`ValueError(...)` 前面少了 `raise`**。
+10. **import 写成 `adamW`，文件名却是 `adamw.py`**：Windows 不区分大小写，Linux 上会报错。
+
+#### 值得注意
+1. **算法（t 从 1 开始）**：
+   - m ← β₁m + (1−β₁)g
+   - v ← β₂v + (1−β₂)g²
+   - α_t = α·√(1−β₂ᵗ)/(1−β₁ᵗ)
+   - θ ← θ − α_t·m/(√v+ε)
+   - θ ← θ − αλθ
+2. **m 管方向，v 管大小**：m 是梯度的滑动平均，来回抖动的方向会相互抵消；v 是梯度平方的滑动平均。m/√v 约等于 ±1，所以第一步的步长约等于 α，和梯度本身的大小无关。
+3. **一切都是逐元素的**：m、v 和 p 同形状，`g*g` 是逐元素平方。优化器状态是参数量的 2 倍。
+4. **t 必须从 1 开始**：t=0 时 α_t = 0/0 = nan。写法是"先加后用"：`t = state.get("t", 0) + 1`。
+5. **权重衰减用原始 α，不用 α_t**：衰减和 m、v 无关，用 α_t 会让衰减强度随 t 先变弱再回升。这就是 decoupled（解耦）的意思。
+6. **为什么要权重衰减**：把没用的权重拉回 0 附近，防止过拟合，也让 logits 和激活值的尺度保持稳定。实际中 bias 和 RMSNorm 的 gain 一般不做衰减。
+7. **`super().__init__(params, defaults)`**：父类负责把 params 整理成 `param_groups`、用 defaults 补全缺失的超参数，并创建 `self.state`。
+8. **α_t 是局部变量**：不要写回 `group["lr"]`，否则每一步会叠加修正。
+
+#### 回忆题
+1. **TinyStories 的 loss = 1.5，困惑度是多少？**
+   - 答案：e^1.5 ≈ 4.48，模型平均在约 4.5 个词里犹豫。
+2. **均匀瞎猜时的 loss 和困惑度？**
+   - 我的答案：1 − log V。
+   - 订正：loss = log V，困惑度 = V ⚠️。
+3. **`self.state[p]` 存什么？**
+   - 我的答案：参数的梯度。
+   - 订正：梯度在 `p.grad` 里 ⚠️。state 存跨步骤的历史：SGD 存 t，AdamW 存 t、m、v。
+4. **m、v 为什么不能存在 `self.m` 上？**
+   - 答案：每个参数要有自己的 m、v，形状各不相同 ✅。
+5. **adapter 为什么返回 `AdamW` 而不是 `AdamW()`？**
+   - 答案：测试会自己用模型参数和超参数构造优化器 ✅。
+6. **权重衰减为什么用原始 lr？**
+   - 我的答案：不太清楚。
+   - 订正：α_t 只是用来修正 m、v 的偏差的，衰减和它们无关，要每步稳定地乘 (1−αλ)。
+
+#### 下一步
+- adamw_accounting：AdamW 训练时的显存（参数、梯度、优化器状态、激活值）和 FLOPs。

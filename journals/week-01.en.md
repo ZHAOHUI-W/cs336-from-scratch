@@ -484,3 +484,100 @@ In short: order is part of the tokenizer; dropping order is a different tokenize
 
 #### Next step
 - §4.1 cross-entropy: the concept questions are answered, so next is implementing `run_cross_entropy`.
+
+## Day — Training basics: cross-entropy, SGD, AdamW (2026-10-28 to 10-30)
+
+### Cross-entropy
+
+#### Common mistakes
+1. **A leftover `self` parameter on a plain function**: `cross_entropy` is not a method and takes no `self`.
+2. **Missing the sum in logsumexp**: it is log(Σ exp(x − m)), so sum first, then take the log.
+3. **m not squeezed**: `max(..., keepdim=True)` gives (N,1), and adding it to (N,) broadcasts to (N,N).
+4. **Calling `inputs.shape(-2)`**: shape is indexed, as in `shape[-2]`.
+5. **reshape results not assigned**: `inputs.reshape(...)` is not in place, so an unassigned call does nothing.
+6. **`reshape(-1,)` flattened the logits to 1D**: it should be `reshape(-1, inputs.shape[-1])`, which keeps the vocab dimension V.
+7. **The adapter was not wired**, and a dead `raise NotImplementedError` was left after the `return`.
+
+#### Noteworthy
+1. **Per-position loss = −x[y] + logsumexp(x)**: the target is one-hot, so the cross-entropy sum reduces to −log p_y.
+2. **Two numerical-stability tricks**: subtracting the max m prevents exp **overflow**. Using logsumexp directly lets log and exp cancel, which avoids softmax underflowing to 0 and then log 0. Computing a stable softmax first and then taking the log still fails on 1000× logits.
+3. **Picking the correct logit**: `inputs[torch.arange(N), targets]` takes column targets[i] from row i.
+4. **The mean is over all B×S positions**: flatten logits to (−1, V) and targets to (−1) first.
+5. **Perplexity = exp(mean cross-entropy)**: average first, then exponentiate, never the other way round. Read it as how many words the model is hesitating among on average.
+6. **Initial-loss sanity check**: uniform guessing gives loss = log V and perplexity = V. That is about 10.8 for V=50257 and about 9.2 for V=10000. If the first training loss is far from this, the init or the loss is probably wrong.
+
+### SGD and learning_rate_tuning
+
+#### Common mistakes
+1. **`super().__init__(self, defaults)`**: the first argument must be `params`, not `self`.
+2. **No `backward()` or `step()` in the experiment loop**: only the loss was computed, so the parameters never updated.
+3. **lr hard-coded to 1**: the loop variable `lr_rate` was never passed to the optimizer.
+4. **Weights and optimizer not rebuilt for each lr**: each run continued from the previous one, so the runs weren't comparable.
+5. **f-string syntax error**: `f"lr={lr_rate}: "loss...` was missing either `{}` or a comma.
+6. **Lowercase `callable` in the type hint**: it should be `Callable`.
+
+#### Noteworthy
+1. **∇ is the gradient**: the partial derivative of the loss for every parameter element, with the same shape as the parameter (`p.grad` has the shape of `p`).
+2. **Each of three things handles one job**: `param_groups` holds hyperparameters, `p.grad` holds gradients, and `state[p]` holds history across steps.
+3. **param_groups is a list of dicts**: different parameters can get different lr or weight_decay, and anything a group leaves out is filled from `defaults`.
+4. **`p.data -= ...` updates in place**: `p = p - ...` only rebinds a local name to a new tensor, so the model parameter doesn't change.
+5. **closure and `return loss`**: they exist for optimizers like L-BFGS that evaluate the loss several times per step. SGD and AdamW don't use them and return None.
+6. **`backward()` accumulates gradients**: that is why `zero_grad()` comes before each step.
+7. **lr experiment**: each step multiplies w by 1 − 2lr/(100√(t+1)), so the loss is multiplied by its square.
+   - lr=10: stable but slow, from 22 to 3 in 10 steps.
+   - lr=100: the step-0 factor is exactly −1, so the loss is unchanged, then it converges quickly to about 1e-23.
+   - lr=1000: the step-0 factor is −19, so the loss is multiplied by 361 and diverges exponentially to about 1e18.
+   - Conclusion: any factor with absolute value above 1 diverges.
+
+### AdamW
+
+#### Common mistakes
+1. **Adapter forgotten for the 7th time**: after editing `adamw.py` it still had `raise NotImplementedError`.
+2. **The adapter returned an instance, `AdamW()`**: it should return the class `AdamW`, and the test constructs it with the parameters and hyperparameters.
+3. **m and v written as `self.m = nn.Parameter(torch.zeros(params))`**:
+   - Every parameter needs its own m and v, which one `self.m` cannot hold.
+   - `params` is a sequence of tensors, not a shape, and a generator gets used up here.
+   - m and v are optimizer state, not trainable parameters.
+   - They belong in `self.state[p]`.
+4. **m and v used before initialization and never stored back**: the first use is undefined.
+5. **`torch.zeros(p)`**: zeros takes a shape. Use `torch.zeros_like(p)`, which also carries dtype and device.
+6. **`math.sqrt(v)`**: v is a tensor, so use `torch.sqrt`.
+7. **t incremented twice**: it was already `+1` at the start, and `t+1` was stored again at the end.
+8. **defaults hard-coded as constants**: the passed-in betas, eps, and weight_decay were ignored.
+9. **`ValueError(...)` without `raise`**.
+10. **Imported as `adamW` while the file is `adamw.py`**: Windows is case-insensitive, but Linux will fail.
+
+#### Noteworthy
+1. **Algorithm (t starts at 1)**:
+   - m ← β₁m + (1−β₁)g
+   - v ← β₂v + (1−β₂)g²
+   - α_t = α·√(1−β₂ᵗ)/(1−β₁ᵗ)
+   - θ ← θ − α_t·m/(√v+ε)
+   - θ ← θ − αλθ
+2. **m gives direction, v gives scale**: m is a moving average of the gradient, so directions that flip back and forth cancel out. v is a moving average of the squared gradient. m/√v is about ±1, so the first step is about α regardless of how big the gradient is.
+3. **Everything is elementwise**: m and v have the shape of p, and `g*g` is an elementwise square. Optimizer state is twice the parameter count.
+4. **t must start at 1**: at t=0, α_t = 0/0 = nan. The pattern is increment-then-use: `t = state.get("t", 0) + 1`.
+5. **Weight decay uses the raw α, not α_t**: decay has nothing to do with m and v, and α_t would make its strength dip and then recover over t. That is what "decoupled" means.
+6. **Why weight decay**: it pulls unhelpful weights back toward 0, which limits overfitting and keeps the scale of logits and activations stable. In practice, biases and RMSNorm gains are usually not decayed.
+7. **`super().__init__(params, defaults)`**: the base class turns params into `param_groups`, fills missing hyperparameters from defaults, and creates `self.state`.
+8. **α_t is a local variable**: never write it back to `group["lr"]`, or the correction compounds every step.
+
+#### Recall questions
+1. **TinyStories loss = 1.5: what is the perplexity?**
+   - Answer: e^1.5 ≈ 4.48, so the model is hesitating among about 4.5 words on average.
+2. **What are the loss and perplexity for uniform guessing?**
+   - My answer: 1 − log V.
+   - Correction: loss = log V and perplexity = V ⚠️.
+3. **What does `self.state[p]` store?**
+   - My answer: the parameter's gradient.
+   - Correction: the gradient is in `p.grad` ⚠️. state holds history across steps: t for SGD, and t, m, v for AdamW.
+4. **Why can't m and v live on `self.m`?**
+   - Answer: every parameter needs its own m and v, each with a different shape ✅.
+5. **Why does the adapter return `AdamW` rather than `AdamW()`?**
+   - Answer: the test constructs the optimizer itself with the model parameters and hyperparameters ✅.
+6. **Why does weight decay use the raw lr?**
+   - My answer: not sure.
+   - Correction: α_t only corrects the bias in m and v. Decay is unrelated to them and should shrink θ by a steady (1−αλ) every step.
+
+#### Next step
+- adamw_accounting: memory for AdamW training (parameters, gradients, optimizer state, activations) and FLOPs.
