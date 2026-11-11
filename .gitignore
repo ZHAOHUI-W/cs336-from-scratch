@@ -33,3 +33,35 @@ runs/
 .idea/
 .vscode/
 *.swp
+
+# Profiling / generated output
+*.prof
+cprofile*.txt
+*.nsys-rep
+*.sqlite
+*.qdrep
+torchinductor_*/
+data-gym-cache/
+
+# Downloads / installers
+*.whl
+*.aria2
+*.zip
+
+# Datasets
+*.npy
+
+# Tool / backup state
+.dsh/
+journals/_backup_*/
+
+# Course handouts (PDF, not code)
+*.pdf
+
+# Large upstream test fixture (>5MB)
+assignments/a1-basics/tests/fixtures/tinystories_sample_5M.txt
+
+# Keep small test fixtures / snapshots and the a2 lockfile despite global rules above
+!assignments/a1-basics/tests/_snapshots/*.npz
+!assignments/a2-systems/tests/fixtures/*.pt
+!assignments/a2-systems/uv.lock
