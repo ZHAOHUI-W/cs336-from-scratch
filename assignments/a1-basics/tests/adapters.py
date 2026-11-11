@@ -22,6 +22,10 @@ from cs336_basics.transformer import TransformerBlock
 from cs336_basics.transformer_lm import TransformerLM
 from cs336_basics.cross_entropy import cross_entropy
 from cs336_basics.adamw import AdamW
+from cs336_basics.lr_schedule import lr_schedule
+from cs336_basics.grad_clip import gradient_clipping
+from cs336_basics.load_dataset import data_loading
+from cs336_basics.model_checkpoint import load_checkpoint,save_checkpoint
 def run_linear(
     d_in: int,
     d_out: int,
@@ -465,7 +469,8 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    return data_loading(dataset=dataset,batch_size=batch_size,context_length=context_length,device=device)
+    # raise NotImplementedError
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -514,6 +519,7 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
+    return gradient_clipping(parameters=parameters,max_l2_norm=max_l2_norm)
     raise NotImplementedError
 
 
@@ -551,6 +557,8 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
+    lr_t = lr_schedule(t=it,t_w=warmup_iters,t_c=cosine_cycle_iters,lr_min=min_learning_rate,lr_max=max_learning_rate)
+    return lr_t
     raise NotImplementedError
 
 
@@ -570,6 +578,7 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
+    return save_checkpoint(model=model,optimizer=optimizer,iteration=iteration,out=out)
     raise NotImplementedError
 
 
@@ -591,6 +600,7 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
+    return load_checkpoint(src=src,model=model,optimizer=optimizer)
     raise NotImplementedError
 
 

@@ -1,3 +1,14 @@
+"""
+train_bpe_multiprocessing.py：多进程预分词 + 增量 pair 计数的 BPE 训练。
+
+流程：
+      1. find_chunk_boundaries 按 special token 把文件切成约 num_workers 块（切点落在 special token 开头）
+      2. 每个子进程（_count_chunk）读自己那一块：按 special 切开 → GPT-2 预分词 → 统计词频 Counter
+      3. 主进程把各块的 Counter 相加得到总词频表
+      4. 之后的 merge 主循环与 train_bpe.py 相同：维护 pair_freq 与 pair_to_words 反向索引，
+         每轮选频次最高（并列取字典序最大）的 pair，只更新受影响的词
+与 train_bpe.py 不同：这里不写 merges.txt。
+"""
 #*- implementation for BPE (Byte Pair Encoding) training *#
 
 # 实现 train_bpe(...)
@@ -27,6 +38,12 @@ from cs336_basics.pretokenization_example import find_chunk_boundaries
 
 PAT= r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 def _count_chunk(args):
+    """
+    子进程任务：统计文件 [start, end) 字节区间内的 pre-token 词频。
+
+    输入：args = (input_path, start, end, special_tokens)
+    输出：Counter，key 是单字节元组（如 (b"h", b"i")），value 是出现次数
+    """
     input_path, start, end, special_tokens = args
 
     with open(input_path, "rb") as file:
@@ -38,7 +55,7 @@ def _count_chunk(args):
 
     if special_tokens_bytes:
         special_tokens_pattern = b'|'.join(re.escape(token) for token in special_tokens_bytes)
-        segments = re.split(special_tokens_pattern, chunk)
+        segments = re.split(special_tokens_pattern, chunk)  # 按 special 切开，special 本身被丢弃
     else:
         segments = [chunk]
     counts = Counter()
@@ -54,11 +71,18 @@ def _count_chunk(args):
 
     return counts
 
+# 注意: 切块只用 special_tokens[0] 作为切点；没有 special token 时用 b"<|endoftext|>" 兜底
 def _build_frequency_table(
     input_path: str,
     special_tokens: list[str],
     num_workers: int,
 ) -> Counter:
+    """
+    并行构建整个文件的词频表。
+
+    输入：input_path、special_tokens、num_workers（进程数，也是期望的块数）
+    输出：Counter[tuple[bytes, ...]]，全文件的 pre-token 词频
+    """
     split_token = (
         special_tokens[0].encode("utf-8")
         if special_tokens
@@ -83,12 +107,12 @@ def _build_frequency_table(
     ]
 
     with mp.Pool(processes=num_workers) as pool:
-        local_counters = pool.map(_count_chunk, tasks)
+        local_counters = pool.map(_count_chunk, tasks)  # 每块交给一个进程，返回各自的 Counter
 
     frequency = Counter()
 
     for local_counter in local_counters:
-        frequency.update(local_counter)
+        frequency.update(local_counter)  # Counter.update 是「按 key 相加」，不是覆盖
 
     return frequency
 
@@ -98,6 +122,17 @@ def train_bpe(
         special_tokens: list[str],
         num_workers: int | None = None
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    """
+    多进程版 BPE 训练。
+
+    输入：
+        input_path (str): 训练语料路径
+        vocab_size (int): 目标词表大小
+        special_tokens (list[str]): 特殊 token 列表
+        num_workers (int | None): 进程数，默认 min(CPU 核数, 4)
+    输出：
+        vocab: dict[int, bytes]；merges: list[tuple[bytes, bytes]]（按学习顺序）
+    """
     if num_workers is None:
         num_workers = min(os.cpu_count() or 4, 4)
 
@@ -126,14 +161,14 @@ def train_bpe(
     while len(vocab) < vocab_size and pair_freq:
         
         # 选最优pair：频次降序，同频次取pair字典序更大
-        best_pair = max(pair_freq.items(), key=lambda x: (x[1], x[0]))[0]
+        best_pair = max(pair_freq.items(), key=lambda x: (x[1], x[0]))[0]  # 频次最高；同频次取字典序更大的 pair
         A, B = best_pair
         merges.append(best_pair)
         C = A + B
 
        
         # 取出所有包含best_pair的word，这是本轮唯一需要处理的word
-        affected_words = pair_to_words.pop(best_pair)
+        affected_words = pair_to_words.pop(best_pair)  # 只需处理包含 best_pair 的词
         # new_freq = dict(freq)  # 先把所有不受影响的word原样复制进new_freq
 
         # 先把所有不受影响的word原样复制进new_freq
@@ -178,7 +213,7 @@ def train_bpe(
                 p = (new_word[j], new_word[j+1])
                 pair_freq[p] = pair_freq.get(p, 0) + cnt
                 pair_to_words[p].add(new_word)
-        vocab[len(vocab)] = C
+        vocab[len(vocab)] = C  # 新 token 的 id 依次递增
         
            
     

@@ -1,3 +1,9 @@
+"""
+pretokenization_example.py：课程提供的示例代码，把大文件切成可以独立并行预分词的块。
+
+思路：先按文件大小均匀猜测切点，再从每个切点往后找最近的 special token（如 b"<|endoftext|>"），
+      把切点挪到 special token 开头，保证一个文档不会被切成两半，也不会切断 UTF-8 多字节字符。
+"""
 import os
 from typing import BinaryIO
 
@@ -10,6 +16,13 @@ def find_chunk_boundaries(
     """
     Chunk the file into parts that can be counted independently.
     May return fewer chunks if the boundaries end up overlapping.
+    中文说明：
+    输入：
+        file (BinaryIO): 以 "rb" 打开的文件对象
+        desired_num_chunks (int): 期望的块数（通常等于进程数）
+        split_special_token (bytes): 用作切点的特殊 token 字节串
+    输出：list[int]，排好序、去重后的切点字节偏移，首个为 0、最后一个为文件大小；
+          相邻两个切点 [start, end) 就是一块。如果多个切点挪到同一位置，块数会少于期望值。
     """
     assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
 
@@ -39,9 +52,9 @@ def find_chunk_boundaries(
                 break
 
             # Find the special token in the mini chunk
-            found_at = mini_chunk.find(split_special_token)
+            found_at = mini_chunk.find(split_special_token)  # 在 4KB 小块中找 special token
             if found_at != -1:
-                chunk_boundaries[bi] = initial_position + found_at
+                chunk_boundaries[bi] = initial_position + found_at  # 切点挪到 special token 开头
                 break
             initial_position += mini_chunk_size
 

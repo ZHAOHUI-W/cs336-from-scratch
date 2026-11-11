@@ -1,3 +1,8 @@
+"""
+profile_bpe.py：用 cProfile（Python 自带的性能分析器）分析分桶版 train_bpe 在 TinyStories 上的耗时。
+
+运行后：结果保存到当前目录的 profile_bpe_buckets.prof，并按累计耗时（cumtime）打印前 50 个函数。
+"""
 # from pathlib import Path
 # from tests.adapters import run_train_bpe
 
@@ -19,6 +24,7 @@ from cs336_basics.train_bpe_multiprocessing_buckets import train_bpe
 
 
 def main():
+    """在 TinyStories 训练集上训练 vocab_size=10000 的 BPE（4 个进程）。"""
     train_bpe(
         input_path=Path("data/TinyStoriesV2-GPT4-train.txt"),
         vocab_size=10000,

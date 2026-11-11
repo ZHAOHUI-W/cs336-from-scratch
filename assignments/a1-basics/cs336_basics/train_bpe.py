@@ -1,3 +1,18 @@
+"""
+train_bpe.py：单进程、带增量 pair 计数优化的字节级 BPE 训练。
+
+整体流程：
+      1. 以二进制读入整个文件
+      2. 按 special token 切开（special 本身被丢弃，不参与统计；跨段的字节不会被合并）
+      3. 每段用 GPT-2 预分词正则切成 pre-token
+      4. 统计词频表 freq: {(b"h", b"i"): 次数, ...}，每个 pre-token 拆成单字节元组
+      5. vocab 初始化 = special tokens（id 从 0 开始）+ 256 个单字节
+      6. 初始化 pair_freq（相邻 pair 的总频次）和 pair_to_words（pair -> 包含它的词集合，反向索引）
+      7. 循环直到 len(vocab) == vocab_size：
+           选频次最高的 pair，频次相同取字典序更大的 pair；
+           只处理包含该 pair 的词：扣掉旧词所有 pair 的计数，合并后再加上新词所有 pair 的计数
+      8. 把 merges 写到当前目录的 merges.txt，然后返回 (vocab, merges)
+"""
 #*- implementation for BPE (Byte Pair Encoding) training *#
 
 # 实现 train_bpe(...)
@@ -27,6 +42,18 @@ def train_bpe(
         special_tokens: list[str]
         
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    """
+    训练字节级 BPE。
+
+    输入：
+        input_path (str): 训练语料文件路径
+        vocab_size (int): 目标词表大小（包含 special token 和 256 个单字节）
+        special_tokens (list[str]): 特殊 token 列表，会被加入 vocab，但不参与 pair 统计
+    输出：
+        vocab: dict[int, bytes]，id -> 字节串；0..len(special)-1 是 special，接着 256 个单字节，再往后是合并出的新 token
+        merges: list[tuple[bytes, bytes]]，按学习顺序排列的合并规则
+    副作用：在当前工作目录写出 merges.txt（每行 "token1 token2"，bytes 用 latin-1 解码成字符串）。
+    """
     # 1. 读文件成一个大字符串
     with open(input_path, "rb") as f:
         text = f.read()
@@ -35,6 +62,7 @@ def train_bpe(
     # 这里可以用正则切分，或者用 str.split
     # 这里假设 special_tokens 是 bytes 类型的列表
     # 将 special_tokens 转换为 bytes 类型
+    # 注意: 实际传入的 special_tokens 是 str 列表，上一行才把它们编码成 bytes
     special_tokens_bytes = [token.encode('utf-8') for token in special_tokens]
     # 构建正则模式，匹配任意一个 special token 先长后短
     special_tokens_bytes = sorted(special_tokens_bytes, key=len, reverse=True)
@@ -43,13 +71,13 @@ def train_bpe(
     else:
         special_tokens_pattern = b'|'.join(re.escape(token) for token in special_tokens_bytes)
     # 使用正则切分文本
-        segments = re.split(special_tokens_pattern, text)
+        segments = re.split(special_tokens_pattern, text)  # re.split 会丢掉匹配到的 special token 本身
 
     # 3. 对每个片段用 GPT-2 PAT 做 pre-tokenize（regex.finditer）PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     PAT= r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     pre_tokens = []
     for segment in segments:
-        pre_tokens.extend([m.group(0).encode('utf-8') for m in re.finditer(PAT, segment.decode('utf-8', errors='strict'))])
+        pre_tokens.extend([m.group(0).encode('utf-8') for m in re.finditer(PAT, segment.decode('utf-8', errors='strict'))])  # 片段按 UTF-8 严格解码；special 切点总在字符边界，所以不会报错
         
 
     # 4. 每个 pre-token → UTF-8 bytes，做成
@@ -58,7 +86,7 @@ def train_bpe(
     freq = defaultdict(int)
     for pt in pre_tokens:
         # 将bytes拆成单个字节 包装成tuple
-        token_tuple = tuple(bytes([b]) for b in pt)
+        token_tuple = tuple(bytes([b]) for b in pt)  # 例如 b"hi" -> (b"h", b"i")
         freq[token_tuple] += 1
 
     # 优化后：维护 pair → count，merge (A,B)→C 时只改邻域上的计数，不要每轮从头数。
@@ -82,14 +110,14 @@ def train_bpe(
         if not pair_freq:
             break
         # 选最优pair：频次降序，同频次取pair字典序更大
-        best_pair = max(pair_freq.items(), key=lambda x: (x[1], x[0]))[0]
+        best_pair = max(pair_freq.items(), key=lambda x: (x[1], x[0]))[0]  # key=(频次, pair)：频次优先，同频次比较 bytes 元组的字典序
         A, B = best_pair
         merges.append(best_pair)
-        C = A + B
+        C = A + B  # 新 token 的字节串 C = A + B
 
        
         # 取出所有包含best_pair的word，这是本轮唯一需要处理的word
-        affected_words = pair_to_words.pop(best_pair)
+        affected_words = pair_to_words.pop(best_pair)  # pop：这个 pair 合并后就不存在了
         # new_freq = dict(freq)  # 先把所有不受影响的word原样复制进new_freq
 
         # 先把所有不受影响的word原样复制进new_freq
@@ -132,13 +160,14 @@ def train_bpe(
                 p = (new_word[j], new_word[j+1])
                 pair_freq[p] = pair_freq.get(p, 0) + cnt
                 pair_to_words[p].add(new_word)
-        vocab[len(vocab)] = C
+        vocab[len(vocab)] = C  # 新 token 的 id 依次递增
         
            
         
 
     # 6. return vocab, merges
     # 将输出的merges存成一个文件到当前目录下，文件名为merges.txt，每行是一个pair，格式为<token1> <token2>，其中<token1>和<token2>是bytes类型的字符串，需要decode成utf-8
+    # 注意: 这里会在「当前工作目录」覆盖写出 merges.txt，是一个副作用（测试运行时也会写）
     with open("merges.txt", "w", encoding="utf-8") as f:
         for pair in merges:
             b1, b2 = pair
