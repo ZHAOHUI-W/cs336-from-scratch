@@ -8,6 +8,7 @@ from cs336_basics.load_dataset import data_loading
 from cs336_basics.grad_clip import gradient_clipping
 import argparse
 import torch.cuda.nvtx as nvtx
+from contextlib import nullcontext
 NUM_LAYERS = 4
 BATCH_SIZE = 4
 
@@ -51,6 +52,8 @@ def parse_args(argv=None):
     parser.add_argument("--options", type=int, choices=(0, 1, 2), required=True,
                         help="0: forward only, 1: forward and backward, 2: forward and backward with optimizer step")
     parser.add_argument("--device", default="cuda", help='"cuda", "cuda:1" or "cpu"')
+    parser.add_argument("--mixed-precision",action="store_true",help="open or close mixed_precision_training")
+    parser.add_argument("--memory-profile",action="store_true")
     args = parser.parse_args(argv)
     if args.n <= 0:
         parser.error(f"--n must be > 0 (got {args.n})")
@@ -62,11 +65,12 @@ def parse_args(argv=None):
         parser.error(f"--context-length must be > 0 (got {args.context_length})")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         parser.error("--device requests CUDA, but CUDA is not available; use --device cpu")
+    
     return args
 
 
-def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, batch_size=None):
-
+def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, batch_size=None, mixed_precision=False,memory_profile=False):
+    
     if n <= 0:
         raise ValueError(f"n must be > 0 (got {n})")
     if w < 0:
@@ -75,10 +79,12 @@ def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, b
         raise ValueError(f"options must be one of 0, 1, 2 (got {options!r})")
 
     device = torch.device(device)
+    ctx = torch.autocast(device_type=device.type,dtype=torch.bfloat16) if mixed_precision else nullcontext()
+    
     config = dict(CONFIG) if model_config is None else dict(model_config)
     bs = BATCH_SIZE if batch_size is None else batch_size
 
-
+    
     model = TransformerLM(**config,device=device)
     optimizer = AdamW(model.parameters(),lr=1e-3)
 
@@ -96,24 +102,33 @@ def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, b
         with nvtx.range("warmup_forward"):
             for t in range(w):
                 with nvtx.range("warmup_forward_step_{}",t):
-                    model.forward(x)
+                    with ctx:
+                        model.forward(x)
             
             synchronize(device)
 
 
         # start_time = timeit.default_timer()
         times = []
+        if memory_profile:
+            torch.cuda.memory._record_memory_history(max_entries=1000000)
         with nvtx.range("measurement_forward"):
             for i in range(n):
                 synchronize(device)
                 with nvtx.range("measurement_forward_step_{}",i):
                     start_time = timeit.default_timer()
                     with nvtx.range("single_forward"):
-                        model.forward(x)
+                        with ctx:
+                            model.forward(x)
                     synchronize(device)
                     end_time = timeit.default_timer()
                     time = end_time - start_time
                     times.append(time)
+            if memory_profile:
+                config_len = config["context_length"]
+                torch.cuda.memory._dump_snapshot(f"memory_snapshot_opt{options}_ctx{config_len}_mixed_precision_{mixed_precision}.pickle")
+                # torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+                torch.cuda.memory._record_memory_history(enabled=None)
             times = np.array(times)
             avg_time = times.mean()
             std_time = times.std()
@@ -129,8 +144,10 @@ def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, b
                 with nvtx.range("warmup_forward+backward_step_{}",t):
                     # model.forward(x)
                     with nvtx.range("single_warmup_forward"):
-                        logits = model(x)
-                    loss = cross_entropy(logits,y)
+                        with ctx:
+                            logits = model(x)
+                    with ctx:
+                        loss = cross_entropy(logits,y)
                     optimizer.zero_grad()
                     with nvtx.range("single_warmup_backward"):
                         loss.backward()
@@ -147,8 +164,10 @@ def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, b
                         # model.forward(x)
                         optimizer.zero_grad()
                         with nvtx.range("single_forward"):
-                            logits = model(x)
-                        loss = cross_entropy(logits,y)
+                            with ctx:
+                                logits = model(x)
+                        with ctx:
+                            loss = cross_entropy(logits,y)
                         with nvtx.range("single_backward"):
                             loss.backward()
                         synchronize(device)
@@ -167,9 +186,11 @@ def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, b
             for t in range(w):
                 with nvtx.range("warmup_step_{}",t):
                     # model.forward(x)
-                    with nvtx.range("warmup_forward"):    
-                        logits = model(x)
-                    loss = cross_entropy(logits,y)
+                    with nvtx.range("warmup_forward"):
+                        with ctx:    
+                            logits = model(x)
+                    with ctx:
+                        loss = cross_entropy(logits,y)
                     optimizer.zero_grad()
                     with nvtx.range("warmup_backward"):
                         loss.backward()
@@ -181,6 +202,8 @@ def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, b
         # torch.cuda.synchronize(device=device)
         # start_time = timeit.default_timer()
         times = []
+        if memory_profile:
+            torch.cuda.memory._record_memory_history(max_entries=1000000)
         with nvtx.range("measurement_full_stage"):
             for i in range(n):
                 synchronize(device)
@@ -189,8 +212,10 @@ def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, b
                     # model.forward(x)
                     optimizer.zero_grad()
                     with nvtx.range("single_forward"):
-                        logits = model(x)
-                    loss = cross_entropy(logits,y)
+                        with ctx:
+                            logits = model(x)
+                    with ctx:
+                        loss = cross_entropy(logits,y)
                     with nvtx.range("single_backward"):
                         loss.backward()
                     with nvtx.range("single_grad_clip"):
@@ -201,6 +226,10 @@ def benchmark(w,n,options:int | None = None ,device="cuda", model_config=None, b
                     end_time = timeit.default_timer()
                     time = end_time - start_time
                     times.append(time)
+            if memory_profile:
+                config_len = config["context_length"]
+                torch.cuda.memory._dump_snapshot(f"memory_snapshot_opt{options}_ctx{config_len}_mixed_precision_{mixed_precision}.pickle")
+                torch.cuda.memory._record_memory_history(enabled=None)
             times = np.array(times)    
             avg_time = times.mean()
             std_time = times.std()
@@ -224,4 +253,6 @@ if __name__ == "__main__":
          device=args.device,
          model_config=model_config,
          batch_size=args.batch_size,
+         mixed_precision=args.mixed_precision,
+         memory_profile=args.memory_profile
      )

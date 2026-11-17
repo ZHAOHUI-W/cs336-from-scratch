@@ -61,3 +61,15 @@ Update every Sunday. Mark: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] Final eval + write-up
 - [ ] Journal week-06
 - [ ] Retro: top 5 design lessons in `docs/design/999-retro.md`
+
+## A2 systems (logged in `journals/week-02.*.md`)
+
+Status as of 2026-11-17. This does not rewrite the six-week checklist above, and it does **not** mark all of §2.1.6 or part (f) complete.
+
+- [x] §2.1.4 Nsight Systems timing on local small (2026-11-11)
+- [x] §2.1.5 mixed precision, including the local RTX 3060 and A100 tables already in the week-02 journals (2026-11-11)
+- [~] §2.1.6 memory profiling (2026-11-16): method, limits, xl-forward (e) observations, local small nsys recapture, and the `--memory-profile` snapshot events are recorded. Part (f) top-5 / single-block totals / backward-gradient size are **not** done; S=2048 was not run; no new GPU rental this round; local small is a method demo, not official xl (f)
+- [~] §3.1 saved tensors and §3.1.1 compile path (2026-11-17): `rmsnorm_test.py` hook comparison is recorded. The current script uses `torch.compile(..., backend="aot_eager")` and does call the compiled function on CUDA; AOT Autograd graph / saved-tensor changes are **not** Inductor/Triton fusion kernels, and hook output is not a measured CUDA peak. The conceptual checkpoint question was answered correctly (recompute the needed forward from the saved region input, then backward; not the whole model; parameters / gradients / optimizer remain). The later experiment is in §3.2
+- [~] §3.2 activation checkpointing (afternoon of 2026-11-17): local small (`B=4`, `S=256`, `d_model=768`, `d_ff=3072`, 12 heads, FP32, CUDA) ordinary vs `use_reentrant=False` checkpoint is recorded from the user’s runs (hooks 189.47 vs 3 MiB; reported single-block peaks 202.72 vs 203.59 MiB, which do not prove a peak drop; reported four-layer whole-region peaks 545.73 vs 352.18 MiB). Current `four_blocks` reuses one `TransformerBlock` four times, not four independent modules. Compile was dropped after an NVTX fullgraph failure. Official (a) was discussed (no sketch submitted). Official (b) xl / `S=2048` / neighboring regions has **not** been run. Time cost was not measured. Peak-measurement hygiene is not claimed complete
+- [ ] §4.1 has not started experimentally
+- This round commits the week-02 journals, this progress section, and related A2 study scripts (`benchmark.py`, `rmsnorm_test.py`, `checkpoint_test.py`, `mixed_precision_accumulation.py`). The large memory-snapshot pickle is not included. §2.1.6 part (f) remains incomplete
